@@ -693,18 +693,21 @@ async def start_aurora_bot():
                     await event.reply("⛔ **Admin / Owner privileges required.**")
                     return
 
-                if not BOT_GROUPS:
-                    await event.reply("ℹ️ **Bot is not currently recorded in any active groups.**\n\n💡 *Add bot to a group or send a message in a group to register it!*")
+                msg = await event.reply("⏳ **Fetching all platform group memberships...**")
+                all_groups = await get_all_platform_groups(bot)
+
+                if not all_groups:
+                    await msg.edit("ℹ️ **No active groups recorded across platform.**\n\n💡 *Add bot or userbot to a group to register it!*")
                     return
 
-                res = f"📊 **Bot Group Membership List (`{len(BOT_GROUPS)}` groups):**\n\n"
-                for g_id, name in BOT_GROUPS.items():
+                res = f"📊 **Bot Group Membership List (`{len(all_groups)}` groups):**\n\n"
+                for g_id, name in all_groups.items():
                     res += f"• **{name}** (ID: `{g_id}`)\n"
 
                 if len(res) > 3900:
                     res = res[:3900] + "\n\n...[List Truncated]"
 
-                await event.reply(res)
+                await msg.edit(res)
                 return
 
             # Command: /gban (Admin & Owner)
@@ -720,35 +723,39 @@ async def start_aurora_bot():
                 reason = parts[1] if len(parts) > 1 else "Globally Banned by Admin"
 
                 msg = await event.reply(f"⚡ **Initiating Global Ban for:** `{raw_target}`...")
+                all_groups = await get_all_platform_groups(bot)
                 target_entity = await resolve_target(bot, raw_target)
                 GBAN_LIST[str(raw_target).lower()] = reason
 
                 banned_count = 0
+                banned_groups = set()
                 bot_me = await bot.get_me()
 
-                # Ban across bot groups
-                for g_id in list(BOT_GROUPS.keys()):
+                # Ban across bot groups where bot has ban rights
+                for g_id in list(all_groups.keys()):
                     try:
                         perms = await bot.get_permissions(g_id, bot_me)
                         if perms.is_admin and getattr(perms, "ban_users", False):
                             await bot.edit_permissions(g_id, target_entity, view_messages=False)
                             banned_count += 1
+                            banned_groups.add(g_id)
                     except Exception as e:
-                        LOGS.error(f"GBan error in bot group {g_id}: {e}")
+                        LOGS.debug(f"GBan error in bot group {g_id}: {e}")
 
-                # Also ban across active userbots dialogs
+                # Also ban across active userbots dialogs for remaining groups
                 for uid in session_manager.get_all_active_users():
                     u_client = session_manager.get_active_client(uid)
                     if u_client and u_client.is_connected():
                         try:
                             u_me = await u_client.get_me()
-                            async for dialog in u_client.iter_dialogs():
-                                if is_group_dialog(dialog) and dialog.id not in BOT_GROUPS:
+                            for g_id in list(all_groups.keys()):
+                                if g_id not in banned_groups:
                                     try:
-                                        u_perms = await u_client.get_permissions(dialog.id, u_me)
+                                        u_perms = await u_client.get_permissions(g_id, u_me)
                                         if u_perms.is_admin and getattr(u_perms, "ban_users", False):
-                                            await u_client.edit_permissions(dialog.id, target_entity, view_messages=False)
+                                            await u_client.edit_permissions(g_id, target_entity, view_messages=False)
                                             banned_count += 1
+                                            banned_groups.add(g_id)
                                     except Exception:
                                         pass
                         except Exception:
@@ -768,21 +775,42 @@ async def start_aurora_bot():
                     return
                 msg = await event.reply(f"⚡ **Initiating Global Unban for:** `{target}`...")
 
+                all_groups = await get_all_platform_groups(bot)
                 target_entity = await resolve_target(bot, target)
                 GBAN_LIST.pop(str(target).lower(), None)
                 GBAN_LIST.pop(str(target), None)
 
                 unbanned_count = 0
+                unbanned_groups = set()
                 bot_me = await bot.get_me()
 
-                for g_id in list(BOT_GROUPS.keys()):
+                for g_id in list(all_groups.keys()):
                     try:
                         perms = await bot.get_permissions(g_id, bot_me)
                         if perms.is_admin and getattr(perms, "ban_users", False):
                             await bot.edit_permissions(g_id, target_entity, view_messages=True, send_messages=True)
                             unbanned_count += 1
+                            unbanned_groups.add(g_id)
                     except Exception as e:
-                        LOGS.error(f"GUnban error in bot group {g_id}: {e}")
+                        LOGS.debug(f"GUnban error in bot group {g_id}: {e}")
+
+                for uid in session_manager.get_all_active_users():
+                    u_client = session_manager.get_active_client(uid)
+                    if u_client and u_client.is_connected():
+                        try:
+                            u_me = await u_client.get_me()
+                            for g_id in list(all_groups.keys()):
+                                if g_id not in unbanned_groups:
+                                    try:
+                                        u_perms = await u_client.get_permissions(g_id, u_me)
+                                        if u_perms.is_admin and getattr(u_perms, "ban_users", False):
+                                            await u_client.edit_permissions(g_id, target_entity, view_messages=True, send_messages=True)
+                                            unbanned_count += 1
+                                            unbanned_groups.add(g_id)
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
 
                 await msg.edit(f"✅ **Global Unban Executed!**\n\n👤 **Target:** `{target}`\n💬 **Unbanned in:** `{unbanned_count}` groups")
                 return
@@ -801,7 +829,7 @@ async def start_aurora_bot():
                 await event.reply(res)
                 return
 
-            # Command: /gbroadcast (Admin & Owner) - Broadcast via Bot Account in all recorded bot groups
+            # Command: /gbroadcast (Admin & Owner) - Dual Fallback Broadcast (Bot -> Active Hosted Userbots)
             if text.startswith("/gbroadcast"):
                 if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Admin / Owner privileges required.**")
@@ -811,20 +839,58 @@ async def start_aurora_bot():
                     await event.reply("💡 **Usage:** `/gbroadcast <message>`")
                     return
 
-                msg = await event.reply("📢 **Sending Global Broadcast across all bot groups...**")
-                sent = 0
+                msg = await event.reply("📢 **Sending Global Broadcast across all platform groups...**")
+
+                all_groups = await get_all_platform_groups(bot)
+                if not all_groups:
+                    await msg.edit("ℹ️ **No active groups recorded across platform to broadcast.**")
+                    return
+
+                sent_bot = 0
+                sent_ub = 0
                 failed = 0
 
-                for g_id in list(BOT_GROUPS.keys()):
+                active_userbots = []
+                for uid in session_manager.get_all_active_users():
+                    u_client = session_manager.get_active_client(uid)
+                    if u_client and u_client.is_connected():
+                        active_userbots.append(u_client)
+
+                for g_id in list(all_groups.keys()):
+                    success = False
+                    # 1. Try sending via Bot Account first
                     try:
                         await bot.send_message(g_id, msg_text)
-                        sent += 1
+                        sent_bot += 1
+                        success = True
                         await asyncio.sleep(0.3)
                     except Exception as e:
-                        LOGS.error(f"GBroadcast error in group {g_id}: {e}")
+                        LOGS.debug(f"Bot cannot send to group {g_id}: {e}")
+
+                    # 2. If Bot failed, try active Userbots
+                    if not success and active_userbots:
+                        for u_client in active_userbots:
+                            try:
+                                await u_client.send_message(g_id, msg_text)
+                                sent_ub += 1
+                                success = True
+                                await asyncio.sleep(0.3)
+                                break  # Sent successfully by userbot
+                            except Exception as e:
+                                LOGS.debug(f"Userbot cannot send to group {g_id}: {e}")
+
+                    if not success:
                         failed += 1
 
-                await msg.edit(f"📢 **Global Broadcast Complete!**\n\n🤖 **Sent by Bot Account in:** `{sent}` groups\n❌ **Failed in:** `{failed}` groups")
+                total_sent = sent_bot + sent_ub
+                total_groups = len(all_groups)
+                await msg.edit(
+                    f"📢 **Global Broadcast Complete!**\n\n"
+                    f"🤖 **Sent by Bot Account in:** `{sent_bot}` groups\n"
+                    f"⚡ **Sent by Hosted Userbots in:** `{sent_ub}` groups\n"
+                    f"❌ **Failed in:** `{failed}` groups\n"
+                    f"📊 **Total Groups Reached:** `{total_sent}` / `{total_groups}` groups"
+                )
                 return
 
             # Command: /block (Owner Only) - Works by username or user_id
