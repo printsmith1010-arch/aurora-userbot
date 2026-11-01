@@ -109,3 +109,13 @@ class ApprovedGroupUser(Base):
     group_id = Column(BigInteger, nullable=False, index=True)
     target = Column(String(255), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AllowedUser(Base):
+    __tablename__ = "allowed_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+

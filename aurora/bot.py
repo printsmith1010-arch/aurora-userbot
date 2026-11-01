@@ -22,7 +22,7 @@ from telethon.sessions import MemorySession, StringSession
 
 from aurora.config import Config, sanitize_text
 from aurora.core.session_manager import session_manager
-from aurora.db.models import User, UserSession, BotGroup, GBanUser, BlockedUser, ApprovedGroupUser
+from aurora.db.models import User, UserSession, BotGroup, GBanUser, BlockedUser, ApprovedGroupUser, AllowedUser
 from aurora.db.session import db_session, init_db
 
 LOGS = logging.getLogger("AuroraHosterBot")
@@ -30,6 +30,7 @@ LOGS = logging.getLogger("AuroraHosterBot")
 user_login_states = {}
 start_time = datetime.utcnow()
 BLOCKED_USERS = {}
+ALLOWED_USERS = {}
 SUDO_USERS = {Config.OWNER_ID}
 GBAN_LIST = {}
 APPROVED_USERS_PER_GROUP = {}
@@ -38,8 +39,38 @@ main_bot_client = None
 gban_sync_lock = asyncio.Lock()
 
 
-def get_bot_client():
-    return main_bot_client
+def is_user_allowed_to_use(user_id, username=None):
+    """
+    Checks if a user is authorized to use or host the Aurora bot/userbot.
+    Owners and Sudo Admins are always authorized.
+    Normal users must be explicitly granted access via /allow.
+    """
+    u_id_str = str(user_id)
+    u_name = (username or "").lower().lstrip("@")
+    u_name_key = f"@{u_name}" if u_name else ""
+
+    # 1. Owner is always allowed
+    if user_id == Config.OWNER_ID or u_id_str == str(Config.OWNER_ID):
+        return True
+
+    # 2. Sudo Admins are always allowed
+    if (
+        user_id in SUDO_USERS
+        or u_id_str in SUDO_USERS
+        or u_name in SUDO_USERS
+        or u_name_key in SUDO_USERS
+    ):
+        return True
+
+    # 3. Allowed Users check
+    if (
+        u_id_str in ALLOWED_USERS
+        or (u_name and u_name in ALLOWED_USERS)
+        or (u_name_key and u_name_key in ALLOWED_USERS)
+    ):
+        return True
+
+    return False
 
 
 def normalize_gban_target(target):
@@ -86,7 +117,15 @@ def load_persistent_data():
                 if ap.group_id not in APPROVED_USERS_PER_GROUP:
                     APPROVED_USERS_PER_GROUP[ap.group_id] = set()
                 APPROVED_USERS_PER_GROUP[ap.group_id].add(ap.target.lower())
-        LOGS.info(f"Loaded {len(BOT_GROUPS)} bot groups, {len(GBAN_LIST)} gban users, {len(BLOCKED_USERS)} blocked users from DB.")
+
+            # Load Allowed Users
+            ALLOWED_USERS.clear()
+            for al in session.query(AllowedUser).all():
+                info = {"id": al.user_id, "username": al.username or "N/A"}
+                ALLOWED_USERS[al.user_id] = info
+                if al.username:
+                    ALLOWED_USERS[al.username.lower()] = info
+        LOGS.info(f"Loaded {len(BOT_GROUPS)} bot groups, {len(GBAN_LIST)} gban users, {len(BLOCKED_USERS)} blocked users, {len(ALLOWED_USERS)} allowed users from DB.")
     except Exception as e:
         LOGS.error(f"Error loading persistent DB data: {e}")
 
@@ -982,6 +1021,9 @@ HELP_TEXT = """🔹 /start - Launch the Bot with a Grand Welcome
 🔹 /logout - Safely Log Out Your Userbot
 🔹 /sudolist - View Sudo Users (Owners Only)
 🔹 /setdp - Set Display Photo (Owners Only)
+🔹 /allow - Authorize a User to Host/Use Bot (Owner/Admin)
+🔹 /disallow - Revoke User Authorization (Owner/Admin)
+🔹 /allowedlist - View Authorized Users (Owner/Admin)
 🔹 /block - Block a User (Owners Only)
 🔹 /unblock - Unblock a User (Owners Only)
 🔹 /blockeduser - View Blocked Users (Owners Only)
@@ -1112,7 +1154,13 @@ CATEGORIES_INFO = {
         "📝 **Description:** Remove a Sudo user (Admin) from the bot.\n"
         "💡 **Example:** `/removesodousers @username`\n\n"
         "🔹 `/listsudousers` (or `/sudolist`)\n"
-        "📝 **Description:** List all Sudo users (Admins)."
+        "📝 **Description:** List all Sudo users (Admins).\n\n"
+        "🔹 `/allow <@username/id>`\n"
+        "📝 **Description:** Authorize user to host/use the userbot.\n\n"
+        "🔹 `/disallow <@username/id>`\n"
+        "📝 **Description:** Revoke user authorization.\n\n"
+        "🔹 `/allowedlist`\n"
+        "📝 **Description:** List all authorized users."
     ),
     "cat_admin": (
         "✨ **Admin 🔧 Commands** ✨\n"
@@ -1126,7 +1174,13 @@ CATEGORIES_INFO = {
         "🔹 `/listgban` (or `/gbanlist`)\n"
         "📝 **Description:** List all globally banned users.\n\n"
         "🔹 `/gbroadcast <message>` (or `.gbroadcast`)\n"
-        "📝 **Description:** Broadcast a message to all groups where the bot/userbots are present."
+        "📝 **Description:** Broadcast a message to all groups where the bot/userbots are present.\n\n"
+        "🔹 `/allow <@username/id>` (or `.allow`)\n"
+        "📝 **Description:** Authorize a user to host and use the userbot.\n\n"
+        "🔹 `/disallow <@username/id>` (or `.disallow`)\n"
+        "📝 **Description:** Revoke user authorization.\n\n"
+        "🔹 `/allowedlist` (or `.allowedlist`)\n"
+        "📝 **Description:** List all authorized users."
     ),
     "cat_bcast": (
         "✨ **Broadcast Commands** ✨\n"
@@ -1407,7 +1461,8 @@ async def start_aurora_bot():
                 "listsudousers", "sudolist", "adminlist",
                 "listgroups", "gbroadcast", "gcast",
                 "restartall", "refresh",
-                "block", "unblock", "blockeduser", "listblock"
+                "block", "unblock", "blockeduser", "listblock",
+                "allow", "disallow", "allowedlist"
             }
 
             if cmd in OWNER_ADMIN_COMMANDS:
@@ -1484,6 +1539,91 @@ async def start_aurora_bot():
                         return
                     SUDO_USERS.discard(target)
                     await event.reply(f"🛑 **Removed Admin/Sudo User:** `{target}`")
+                    return
+                elif cmd == "allow":
+                    target = text[len(first_word):].strip()
+                    if not target:
+                        reply = await event.get_reply_message()
+                        if reply and reply.sender_id:
+                            target = str(reply.sender_id)
+                    if not target:
+                        await event.reply("💡 **Usage:** `.allow <@username or user_id>` or reply to a user")
+                        return
+
+                    a_id = target
+                    a_name = None
+                    try:
+                        target_ent = await bot.get_entity(target if not target.lstrip("-").isdigit() else int(target))
+                        a_id = str(target_ent.id)
+                        a_name = getattr(target_ent, "username", None)
+                    except Exception:
+                        if target.startswith("@"):
+                            a_name = target[1:]
+                        else:
+                            a_id = target
+
+                    info = {"id": a_id, "username": a_name or "N/A"}
+                    ALLOWED_USERS[a_id] = info
+                    if a_name:
+                        ALLOWED_USERS[a_name.lower()] = info
+
+                    try:
+                        with db_session() as session:
+                            existing = session.query(AllowedUser).filter(AllowedUser.user_id == a_id).first()
+                            if not existing:
+                                session.add(AllowedUser(user_id=a_id, username=a_name))
+                            session.commit()
+                    except Exception as e:
+                        LOGS.error(f"Error saving AllowedUser: {e}")
+
+                    u_str = f"@{a_name} (ID: `{a_id}`)" if a_name else f"ID: `{a_id}`"
+                    await event.reply(f"✅ **Allowed User:** {u_str}\n\n*User is now authorized to host and use Aurora Userbot.*")
+                    return
+                elif cmd == "disallow":
+                    target = text[len(first_word):].strip()
+                    if not target:
+                        reply = await event.get_reply_message()
+                        if reply and reply.sender_id:
+                            target = str(reply.sender_id)
+                    if not target:
+                        await event.reply("💡 **Usage:** `.disallow <@username or user_id>` or reply to a user")
+                        return
+
+                    removed = False
+                    target_lower = target.lower().lstrip("@")
+                    for k in list(ALLOWED_USERS.keys()):
+                        if k.lower() == target_lower or str(ALLOWED_USERS[k].get("id")) == target:
+                            r_id = ALLOWED_USERS[k].get("id")
+                            ALLOWED_USERS.pop(k, None)
+                            removed = True
+                            try:
+                                with db_session() as session:
+                                    session.query(AllowedUser).filter(
+                                        (AllowedUser.user_id == r_id) | (AllowedUser.username == k)
+                                    ).delete(synchronize_session=False)
+                                    session.commit()
+                            except Exception:
+                                pass
+
+                    if removed:
+                        await event.reply(f"🛑 **Disallowed User:** `{target}`\n\n*User can no longer host or use Aurora Userbot.*")
+                    else:
+                        await event.reply(f"ℹ️ **User `{target}` is not in allowed list.**")
+                    return
+                elif cmd in ["allowedlist", "listallow", "allowlist"]:
+                    unique_allowed = {}
+                    for info in ALLOWED_USERS.values():
+                        unique_allowed[info["id"]] = info.get("username") or "N/A"
+
+                    if not unique_allowed:
+                        await event.reply("ℹ️ **No users currently in allowed list.**\n\n*Only Owner & Sudo Admins have default permission.*")
+                        return
+
+                    res = f"📋 **Authorized/Allowed Users List (`{len(unique_allowed)}`):**\n\n"
+                    for u_id, u_name in unique_allowed.items():
+                        name_display = f"@{u_name}" if u_name != "N/A" else "N/A"
+                        res += f"• `{name_display}` (ID: `{u_id}`)\n"
+                    await event.reply(res)
                     return
                 elif cmd in ["restartall", "refresh"]:
                     if sender_id != Config.OWNER_ID:
@@ -1643,6 +1783,15 @@ async def start_aurora_bot():
         )
         if is_gbanned and chat_id != Config.OWNER_ID:
             await event.reply("🚫 **You are currently GBANNED from using Aurora Userbot!**\n\nAsk platform Owner or Admin for unban.")
+            return
+
+        # Authorization check: only Allowed users, Sudo Admins, or Owner can use or host the bot
+        if not is_user_allowed_to_use(chat_id, uname):
+            await event.reply(
+                "⛔ **Access Denied!**\n\n"
+                "You do not have permission to use or host this bot.\n"
+                "Please take owner/admin permission (`/allow`) to gain access."
+            )
             return
 
         text = (event.raw_text or "").strip()
@@ -2108,6 +2257,107 @@ async def start_aurora_bot():
                 await event.reply(res)
                 return
 
+            # Command: /allow or .allow (Owner & Admin)
+            if cmd == "allow":
+                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS and sender_id_str not in SUDO_USERS:
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
+                    return
+                target = text[len(text.split()[0]):].strip()
+                if not target:
+                    reply = await event.get_reply_message()
+                    if reply and reply.sender_id:
+                        target = str(reply.sender_id)
+                if not target:
+                    await event.reply("💡 **Usage:** `/allow <@username or user_id>` or reply to a user")
+                    return
+
+                a_id = target
+                a_name = None
+                try:
+                    target_ent = await bot.get_entity(target if not target.lstrip("-").isdigit() else int(target))
+                    a_id = str(target_ent.id)
+                    a_name = getattr(target_ent, "username", None)
+                except Exception:
+                    if target.startswith("@"):
+                        a_name = target[1:]
+                    else:
+                        a_id = target
+
+                info = {"id": a_id, "username": a_name or "N/A"}
+                ALLOWED_USERS[a_id] = info
+                if a_name:
+                    ALLOWED_USERS[a_name.lower()] = info
+
+                try:
+                    with db_session() as session:
+                        existing = session.query(AllowedUser).filter(AllowedUser.user_id == a_id).first()
+                        if not existing:
+                            session.add(AllowedUser(user_id=a_id, username=a_name))
+                        session.commit()
+                except Exception as e:
+                    LOGS.error(f"Error saving AllowedUser: {e}")
+
+                u_str = f"@{a_name} (ID: `{a_id}`)" if a_name else f"ID: `{a_id}`"
+                await event.reply(f"✅ **Allowed User:** {u_str}\n\n*User is now authorized to host and use Aurora Userbot.*")
+                return
+
+            # Command: /disallow or .disallow (Owner & Admin)
+            if cmd == "disallow":
+                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS and sender_id_str not in SUDO_USERS:
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
+                    return
+                target = text[len(text.split()[0]):].strip()
+                if not target:
+                    reply = await event.get_reply_message()
+                    if reply and reply.sender_id:
+                        target = str(reply.sender_id)
+                if not target:
+                    await event.reply("💡 **Usage:** `/disallow <@username or user_id>` or reply to a user")
+                    return
+
+                removed = False
+                target_lower = target.lower().lstrip("@")
+                for k in list(ALLOWED_USERS.keys()):
+                    if k.lower() == target_lower or str(ALLOWED_USERS[k].get("id")) == target:
+                        r_id = ALLOWED_USERS[k].get("id")
+                        ALLOWED_USERS.pop(k, None)
+                        removed = True
+                        try:
+                            with db_session() as session:
+                                session.query(AllowedUser).filter(
+                                    (AllowedUser.user_id == r_id) | (AllowedUser.username == k)
+                                ).delete(synchronize_session=False)
+                                session.commit()
+                        except Exception:
+                            pass
+
+                if removed:
+                    await event.reply(f"🛑 **Disallowed User:** `{target}`\n\n*User can no longer host or use Aurora Userbot.*")
+                else:
+                    await event.reply(f"ℹ️ **User `{target}` is not in allowed list.**")
+                return
+
+            # Command: /allowedlist or .allowedlist (Owner & Admin)
+            if cmd in ["allowedlist", "listallow", "allowlist"]:
+                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS and sender_id_str not in SUDO_USERS:
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
+                    return
+
+                unique_allowed = {}
+                for info in ALLOWED_USERS.values():
+                    unique_allowed[info["id"]] = info.get("username") or "N/A"
+
+                if not unique_allowed:
+                    await event.reply("ℹ️ **No users currently in allowed list.**\n\n*Only Owner & Sudo Admins have default permission.*")
+                    return
+
+                res = f"📋 **Authorized/Allowed Users List (`{len(unique_allowed)}`):**\n\n"
+                for u_id, u_name in unique_allowed.items():
+                    name_display = f"@{u_name}" if u_name != "N/A" else "N/A"
+                    res += f"• `{name_display}` (ID: `{u_id}`)\n"
+                await event.reply(res)
+                return
+
             # Command: /stats or .stats
             if cmd == "stats":
                 total_active = len(session_manager.get_all_active_users())
@@ -2344,6 +2594,19 @@ async def start_aurora_bot():
             return
 
         if data == "cmd_host":
+            sender_obj = await event.get_sender()
+            uname = getattr(sender_obj, "username", None) or ""
+            if not is_user_allowed_to_use(event.chat_id, uname):
+                try:
+                    await event.respond(
+                        "⛔ **Access Denied!**\n\n"
+                        "You do not have permission to host this bot.\n"
+                        "Please take owner/admin permission (`/allow`) to gain access."
+                    )
+                except Exception:
+                    pass
+                return
+
             user_client = session_manager.get_active_client(event.chat_id)
             has_db_session = session_manager.get_decrypted_session(event.chat_id) is not None
             if (user_client and user_client.is_connected()) or has_db_session:
