@@ -1839,16 +1839,12 @@ async def start_aurora_bot():
                     return
 
                 user_login_states[chat_id] = {
-                    "step": "WAITING_COUNTRY",
+                    "step": "WAITING_PHONE",
                     "phone": None,
                     "client": None,
                     "phone_code_hash": None,
                 }
-                country_buttons = [
-                    [Button.inline("🇮🇳 India (+91)", data="country_in"), Button.inline("🇬🇱 Greenland (+299)", data="country_gl")],
-                    [Button.inline("🌐 Other Country", data="country_other")]
-                ]
-                await event.reply("🌍 **Choose your country for Phone Login:**", buttons=country_buttons)
+                await event.reply("📱 **Enter Phone Number (+91xxxxxxxxxx for India or +299xxxxxx for Greenland):**")
                 return
 
             # Command: /start or .start
@@ -2439,10 +2435,10 @@ async def start_aurora_bot():
             state = user_login_states[chat_id]
             step = state.get("step")
 
-            if step in ["WAITING_COUNTRY", "WAITING_PHONE"]:
+            if step == "WAITING_PHONE":
                 phone = text.replace(" ", "").replace("-", "")
                 if not (phone.startswith("+") and phone[1:].isdigit()):
-                    await event.reply("❌ **Invalid phone format.** Please include `+` with country code (e.g. `+91xxxxxxxxxx` or `+299xxxxxx`).")
+                    await event.reply("❌ **Invalid phone format.** Enter e.g. `+91xxxxxxxxxx` or `+299xxxxxx`.")
                     return
 
                 state["phone"] = phone
@@ -2465,42 +2461,10 @@ async def start_aurora_bot():
                     state["client"] = client
                     state["phone_code_hash"] = getattr(code_req, "phone_code_hash", None)
                     state["step"] = "WAITING_OTP"
-
-                    from telethon.tl.types.auth import (
-                        SentCodeTypeApp,
-                        SentCodeTypeSms,
-                        SentCodeTypeCall,
-                        SentCodeTypeFlashCall,
-                    )
-
-                    req_type = getattr(code_req, "type", None)
-                    if isinstance(req_type, SentCodeTypeApp):
-                        delivery_method = (
-                            "📲 **Telegram sent the code to your Telegram App!**\n\n"
-                            "👉 Open your Telegram app and look for the chat named **\"Telegram\"** (Service Notifications) to view your 5-digit code."
-                        )
-                    elif isinstance(req_type, SentCodeTypeSms):
-                        delivery_method = (
-                            "📩 **Telegram sent the code via SMS!**\n\n"
-                            "👉 Check your phone's SMS inbox for the 5-digit code."
-                        )
-                    elif isinstance(req_type, (SentCodeTypeCall, SentCodeTypeFlashCall)):
-                        delivery_method = (
-                            "📞 **Telegram is calling your phone number with the code.**"
-                        )
-                    else:
-                        delivery_method = (
-                            "📲 **Check your Telegram App (Service Notifications) or SMS for the code.**"
-                        )
-
-                    otp_buttons = [
-                        [Button.inline("❌ Cancel Login", data="cancel_login")]
-                    ]
-
                     await msg.edit(
-                        f"🔑 **Enter Login Code (e.g. 1 2 3 4 5 or 12345):**\n\n"
-                        f"{delivery_method}",
-                        buttons=otp_buttons
+                        "🔑 **Enter OTP (e.g., 1 2 3 4 5):**\n\n"
+                        "📲 **IMPORTANT:** Check your **official Telegram app** (Service Notifications chat) for your 5-digit login code!\n"
+                        "⚡ *OTP expires in 2 minutes.*"
                     )
                 except PhoneNumberInvalidError:
                     await client.disconnect()
@@ -2664,17 +2628,13 @@ async def start_aurora_bot():
                 return
 
             user_login_states[event.chat_id] = {
-                "step": "WAITING_COUNTRY",
+                "step": "WAITING_PHONE",
                 "phone": None,
                 "client": None,
                 "phone_code_hash": None,
             }
-            country_buttons = [
-                [Button.inline("🇮🇳 India (+91)", data="country_in"), Button.inline("🇬🇱 Greenland (+299)", data="country_gl")],
-                [Button.inline("🌐 Other Country", data="country_other")]
-            ]
             try:
-                await event.respond("🌍 **Choose your country for Phone Login:**", buttons=country_buttons)
+                await event.respond("📱 **Enter Phone Number (+91xxxxxxxxxx for India or +299xxxxxx for Greenland):**")
             except Exception:
                 pass
             return
@@ -2684,63 +2644,6 @@ async def start_aurora_bot():
                 await event.edit(COMMANDS_HEADER, buttons=get_commands_keyboard())
             except Exception:
                 pass
-            return
-
-        if data in ["country_in", "country_gl", "country_other"]:
-            state = user_login_states.get(event.chat_id, {})
-            state["step"] = "WAITING_PHONE"
-            user_login_states[event.chat_id] = state
-
-            if data == "country_in":
-                prompt_text = "🇮🇳 **India Selected (+91)**\n\n📱 **Enter your Indian Phone Number:**\nExample: `+919876543210`"
-            elif data == "country_gl":
-                prompt_text = "🇬🇱 **Greenland Selected (+299)**\n\n📱 **Enter your Greenland Phone Number:**\nExample: `+299xxxxxx`"
-            else:
-                prompt_text = "🌐 **Enter your International Phone Number with country code:**\nExample: `+1234567890`"
-
-            try:
-                await event.edit(prompt_text)
-            except Exception:
-                await event.respond(prompt_text)
-            return
-
-        if data == "resend_otp_sms":
-            state = user_login_states.get(event.chat_id)
-            if not state or not state.get("client") or not state.get("phone") or not state.get("phone_code_hash"):
-                try:
-                    await event.answer("⚠️ Session expired. Please start over with /host.", alert=True)
-                except Exception:
-                    pass
-                return
-
-            client = state["client"]
-            phone = state["phone"]
-            phone_code_hash = state["phone_code_hash"]
-
-            try:
-                await event.answer("📩 Requesting OTP via SMS...", alert=False)
-                new_req = await client.send_code_request(phone, force_sms=True)
-                state["phone_code_hash"] = getattr(new_req, "phone_code_hash", phone_code_hash)
-                await event.respond("📩 **Telegram has requested OTP delivery via SMS!**\n\nCheck your phone's SMS messages inbox now.")
-            except Exception as e:
-                try:
-                    await event.respond(f"ℹ️ Telegram SMS notice: `{e}`\n\n*If Telegram recently sent the code to your official Telegram app, please check the 'Telegram' chat in your Telegram app.*")
-                except Exception:
-                    pass
-            return
-
-        if data == "cancel_login":
-            if event.chat_id in user_login_states:
-                old_sess = user_login_states.pop(event.chat_id)
-                if old_sess.get("client"):
-                    try:
-                        await old_sess["client"].disconnect()
-                    except Exception:
-                        pass
-            try:
-                await event.edit("❌ **Hosting cancelled.** Send `/host` whenever you want to begin again.")
-            except Exception:
-                await event.respond("❌ **Hosting cancelled.** Send `/host` whenever you want to begin again.")
             return
 
         if data == "cat_owner":
