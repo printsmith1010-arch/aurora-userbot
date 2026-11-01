@@ -1760,6 +1760,10 @@ async def start_aurora_bot():
         if not event.is_private:
             return
 
+        # Ignore outgoing messages sent by the bot itself to prevent infinite self-reply loops!
+        if getattr(event, "out", False):
+            return
+
         chat_id = event.chat_id
         sender_id_str = str(chat_id)
         sender_obj = await event.get_sender()
