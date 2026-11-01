@@ -2461,6 +2461,7 @@ async def start_aurora_bot():
 
                 try:
                     await asyncio.wait_for(client.connect(), timeout=15)
+                    # First request - Telegram decides delivery (usually App if logged in elsewhere)
                     code_req = await asyncio.wait_for(client.send_code_request(phone), timeout=25)
                     state["client"] = client
                     state["phone_code_hash"] = getattr(code_req, "phone_code_hash", None)
@@ -2474,24 +2475,39 @@ async def start_aurora_bot():
                     )
 
                     req_type = getattr(code_req, "type", None)
+
+                    # If OTP went to Telegram app, auto-resend via SMS so user gets it on phone
                     if isinstance(req_type, SentCodeTypeApp):
-                        delivery_method = (
-                            "📲 **Sent to Telegram App!**\n"
-                            "Open your official Telegram app → look inside the chat named **\"Telegram\"** (Service Notifications) for the 5-digit code."
-                        )
+                        try:
+                            sms_req = await asyncio.wait_for(
+                                client.send_code_request(phone, force_sms=True), timeout=25
+                            )
+                            state["phone_code_hash"] = getattr(sms_req, "phone_code_hash", state["phone_code_hash"])
+                            delivery_method = (
+                                "📩 **OTP sent via SMS to your phone!**\n"
+                                "Check your SMS inbox for the 5-digit Telegram code.\n\n"
+                                "*(Also check Telegram app → Service Notifications if SMS doesn't arrive)*"
+                            )
+                        except Exception:
+                            # Fallback: tell user to check app
+                            delivery_method = (
+                                "📲 **Sent to Telegram App (Service Notifications)**\n"
+                                "Open Telegram → find chat named **\"Telegram\"** → copy the 5-digit code.\n\n"
+                                "*(Tap Resend via SMS below if you want it on SMS instead)*"
+                            )
                     elif isinstance(req_type, SentCodeTypeSms):
                         delivery_method = (
                             "📩 **Sent via SMS!**\n"
-                            "Telegram sent the OTP to your phone's SMS messages inbox."
+                            "Check your phone's SMS inbox for the 5-digit code."
                         )
                     elif isinstance(req_type, (SentCodeTypeCall, SentCodeTypeFlashCall)):
                         delivery_method = (
-                            "📞 **Sent via Phone Call / Missed Call!**\n"
-                            "Telegram is calling your phone number with the verification code."
+                            "📞 **Sent via Phone Call!**\n"
+                            "Telegram is calling your number with the verification code."
                         )
                     else:
                         delivery_method = (
-                            "📲 Check your **official Telegram app** (Service Notifications) or **SMS** for the code."
+                            "📩 **OTP sent!** Check your SMS or Telegram app (Service Notifications)."
                         )
 
                     otp_buttons = [
@@ -2500,9 +2516,9 @@ async def start_aurora_bot():
                     ]
 
                     await msg.edit(
-                        f"🔑 **Enter Login Code (e.g., 1 2 3 4 5):**\n\n"
+                        f"🔑 **Enter Login Code (e.g., 12345 or 1 2 3 4 5):**\n\n"
                         f"{delivery_method}\n\n"
-                        f"⚠️ *If you haven't received it in the Telegram chat, tap **Resend via SMS** below.*",
+                        f"⚠️ *Didn't receive it? Tap **Resend via SMS** below.*",
                         buttons=otp_buttons
                     )
                 except PhoneNumberInvalidError:
