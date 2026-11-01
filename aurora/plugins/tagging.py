@@ -24,7 +24,7 @@ def register_tagging_handlers(client):
     Registers tagging event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.tagall(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]tagall(?:\s+([\s\S]+))?"))
     async def tagall_handler(event):
         if not event.is_group:
             await event.edit("❌ **This command can only be used in groups.**")
@@ -57,7 +57,7 @@ def register_tagging_handlers(client):
 
         CANCEL_TAGS.discard(event.chat_id)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(stoptagall|canceltag)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](stoptagall|canceltag)(?:\s+([\s\S]+))?"))
     async def canceltag_handler(event):
         CANCEL_TAGS.add(event.chat_id)
         await event.edit("🛑 **Tagging process stopped for this chat.**")

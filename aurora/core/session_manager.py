@@ -154,6 +154,17 @@ class UserSessionManager:
                 if not await client.is_user_authorized():
                     LOGS.warning(f"Session for user {telegram_id} is no longer authorized.")
                     await client.disconnect()
+                    try:
+                        db = db_session()
+                        db.query(UserSession).filter(UserSession.telegram_id == telegram_id).delete()
+                        user = db.query(User).filter(User.telegram_id == telegram_id).first()
+                        if user:
+                            user.is_active = False
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                    finally:
+                        db_session.remove()
                     return None
 
                 me = await client.get_me()
@@ -175,7 +186,6 @@ class UserSessionManager:
                 from aurora.plugins.broadcast import register_broadcast_handlers
                 from aurora.plugins.pmguard import register_pmguard_handlers
                 from aurora.plugins.autoreply import register_autoreply_handlers
-                from aurora.plugins.music import register_music_handlers
 
                 register_admin_handlers(client)
                 register_owner_handlers(client)
@@ -191,7 +201,6 @@ class UserSessionManager:
                 register_broadcast_handlers(client)
                 register_pmguard_handlers(client)
                 register_autoreply_handlers(client)
-                register_music_handlers(client)
 
                 self._clients[telegram_id] = client
                 LOGS.info(f"Started isolated session for user @{getattr(me, 'username', None) or me.id}")

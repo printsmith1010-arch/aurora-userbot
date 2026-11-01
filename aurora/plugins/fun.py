@@ -41,24 +41,24 @@ def register_fun_handlers(client):
     Registers fun event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.joke$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]joke$"))
     async def joke_handler(event):
         joke = random.choice(HINGLISH_JOKES)
         await event.edit(joke)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.flip$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]flip$"))
     async def flip_handler(event):
         result = random.choice(["🪙 **Heads!**", "🪙 **Tails!**"])
         await event.edit(f"🪙 **Flipping coin...**\n\nResult: {result}")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.roll(?:\s+(\d+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]roll(?:\s+(\d+))?"))
     async def roll_handler(event):
         num_str = event.pattern_match.group(1)
         max_val = int(num_str) if num_str else 6
         val = random.randint(1, max_val)
         await event.edit(f"🎲 **Rolled Dice (1-{max_val}):** `{val}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.rps(?:\s+(rock|paper|scissors))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]rps(?:\s+(rock|paper|scissors))?"))
     async def rps_handler(event):
         user_choice = event.pattern_match.group(1)
         if not user_choice:
@@ -80,7 +80,7 @@ def register_fun_handlers(client):
 
         await event.edit(f"🎮 **Rock Paper Scissors!**\n\n👤 **You:** `{user_c.capitalize()}`\n🤖 **Bot:** `{bot_choice.capitalize()}`\n\n{res}")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.calc(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]calc(?:\s+([\s\S]+))?"))
     async def calc_handler(event):
         expr = event.pattern_match.group(1)
         if not expr:
@@ -97,7 +97,7 @@ def register_fun_handlers(client):
         except Exception as e:
             await event.edit(f"❌ **Calc error:** `{e}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.slap(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]slap(?:\s+([\s\S]+))?"))
     async def slap_handler(event):
         reply = await event.get_reply_message()
         target_str = event.pattern_match.group(1)
@@ -112,7 +112,7 @@ def register_fun_handlers(client):
         obj = random.choice(SLAP_OBJECTS)
         await event.edit(f"👋 **Slapped {target} with {obj}!**")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.dice$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]dice$"))
     async def dice_handler(event):
         await event.delete()
         await event.respond(file=InputMediaDice(emoticon="🎲"))

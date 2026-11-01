@@ -29,7 +29,7 @@ def register_custom_handlers(client):
     Registers customization event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.stylish(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]stylish(?:\s+([\s\S]+))?"))
     async def stylish_handler(event):
         name = event.pattern_match.group(1)
         if not name:
@@ -50,7 +50,7 @@ def register_custom_handlers(client):
         )
         await event.edit(res)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.changeowner(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]changeowner(?:\s+([\s\S]+))?"))
     async def changeowner_handler(event):
         owner_str = event.pattern_match.group(1)
         if not owner_str:

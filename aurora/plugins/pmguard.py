@@ -24,7 +24,7 @@ def register_pmguard_handlers(client):
     Registers AntiSafe and approval handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.antisafe(?:\s+(on|off))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]antisafe(?:\s+(on|off))?"))
     async def antisafe_handler(event):
         mode = event.pattern_match.group(1)
         me = await client.get_me()
@@ -39,7 +39,7 @@ def register_pmguard_handlers(client):
             status = "ACTIVE" if ANTISAFE_ACTIVE.get(me.id) else "INACTIVE"
             await event.edit(f"🛡️ **AntiSafe Shield Status:** `{status}`\n💡 **Usage:** `.antisafe on` | `.antisafe off`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.approve$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]approve$"))
     async def approve_handler(event):
         if not event.is_private:
             await event.edit("❌ **Use this command in a private chat.**")
@@ -53,7 +53,7 @@ def register_pmguard_handlers(client):
         APPROVED_USERS[me.id].add(user_id)
         await event.edit("✅ **User approved! Saved from AntiSafe deletion.**")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.disapprove$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]disapprove$"))
     async def disapprove_handler(event):
         if not event.is_private:
             await event.edit("❌ **Use this command in a private chat.**")

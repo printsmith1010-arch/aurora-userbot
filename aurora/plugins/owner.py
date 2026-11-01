@@ -28,7 +28,7 @@ def register_owner_handlers(client):
     Registers owner-restricted handlers on client with strict sender_id check.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.eval(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]eval(?:\s+([\s\S]+))?"))
     async def eval_handler(event):
         if event.sender_id != Config.OWNER_ID:
             await event.edit("⛔ **Access Denied:** Platform Owner privileges required.")
@@ -47,7 +47,7 @@ def register_owner_handlers(client):
         except Exception as e:
             await event.edit(f"❌ **Eval Error:**\n```python\n{traceback.format_exc()}\n```")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.exec(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]exec(?:\s+([\s\S]+))?"))
     async def exec_handler(event):
         if event.sender_id != Config.OWNER_ID:
             await event.edit("⛔ **Access Denied:** Platform Owner privileges required.")
@@ -66,7 +66,7 @@ def register_owner_handlers(client):
         except Exception as e:
             await event.edit(f"❌ **Exec Error:**\n```python\n{traceback.format_exc()}\n```")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(?:terminal|term|bash)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](?:terminal|term|bash)(?:\s+([\s\S]+))?"))
     async def terminal_handler(event):
         if event.sender_id != Config.OWNER_ID:
             await event.edit("⛔ **Access Denied:** Platform Owner privileges required.")
@@ -94,7 +94,7 @@ def register_owner_handlers(client):
         except Exception as e:
             await event.edit(f"❌ **Terminal Error:** `{e}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.sysstats$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]sysstats$"))
     async def sysstats_handler(event):
         if event.sender_id != Config.OWNER_ID:
             await event.edit("⛔ **Access Denied:** Platform Owner privileges required.")

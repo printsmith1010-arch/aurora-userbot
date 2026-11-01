@@ -57,7 +57,7 @@ def register_raid_handlers(client):
     Registers raid event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.raid\s+(\d+)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]raid\s+(\d+)(?:\s+([\s\S]+))?"))
     async def raid_handler(event):
         count = int(event.pattern_match.group(1))
         target_str = event.pattern_match.group(2)
@@ -86,7 +86,7 @@ def register_raid_handlers(client):
 
         ACTIVE_RAIDS.discard(chat)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.araid(?:\s+(\d+))?(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]araid(?:\s+(\d+))?(?:\s+([\s\S]+))?"))
     async def araid_handler(event):
         count = int(event.pattern_match.group(1) or 10)
         target_str = event.pattern_match.group(2)
@@ -114,13 +114,13 @@ def register_raid_handlers(client):
 
         ACTIVE_RAIDS.discard(chat)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.stopraid(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]stopraid(?:\s+([\s\S]+))?"))
     async def stopraid_handler(event):
         ACTIVE_RAIDS.discard(event.chat_id)
         ACTIVE_RAIDS.clear()
         await event.edit("🛑 **Raid stopped successfully!**")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.sraid\s+(\d+)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]sraid\s+(\d+)(?:\s+([\s\S]+))?"))
     async def sraid_handler(event):
         count = int(event.pattern_match.group(1))
         target_str = event.pattern_match.group(2)
@@ -141,12 +141,12 @@ def register_raid_handlers(client):
 
         ACTIVE_RAIDS.discard(chat)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.stopsraid$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]stopsraid$"))
     async def stopsraid_handler(event):
         ACTIVE_RAIDS.discard(event.chat_id)
         await event.edit("🛑 **Shayari raid stopped successfully!**")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(replyraid|rraid)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](replyraid|rraid)(?:\s+([\s\S]+))?"))
     async def replyraid_handler(event):
         reply = await event.get_reply_message()
         target_str = event.pattern_match.group(2)
@@ -168,7 +168,7 @@ def register_raid_handlers(client):
         ACTIVE_RRAIDS.add(target_id)
         await event.edit(f"🎯 **Hinglish Reply Raid Activated On User:** `{target_id}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(dreplyraid|drraid)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](dreplyraid|drraid)(?:\s+([\s\S]+))?"))
     async def dreplyraid_handler(event):
         reply = await event.get_reply_message()
         target_str = event.pattern_match.group(2)
@@ -190,14 +190,14 @@ def register_raid_handlers(client):
             ACTIVE_RRAIDS.clear()
             await event.edit("🛑 **All Active Reply Raids Stopped.**")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.setraid\s+([\s\S]+)"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]setraid\s+([\s\S]+)"))
     async def setraid_handler(event):
         link = event.pattern_match.group(1).strip()
         me = await client.get_me()
         PERSONAL_RAID_CHANNELS[me.id] = link
         await event.edit(f"⚡ **Personal Raid Channel Set To:** `{link}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.craid\s+(\d+)"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]craid\s+(\d+)"))
     async def craid_handler(event):
         count = int(event.pattern_match.group(1))
         await event.delete()

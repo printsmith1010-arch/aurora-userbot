@@ -22,7 +22,7 @@ from telethon.sessions import MemorySession, StringSession
 
 from aurora.config import Config, sanitize_text
 from aurora.core.session_manager import session_manager
-from aurora.db.models import User, UserSession, BotGroup, GBanUser, BlockedUser
+from aurora.db.models import User, UserSession, BotGroup, GBanUser, BlockedUser, ApprovedGroupUser
 from aurora.db.session import db_session, init_db
 
 LOGS = logging.getLogger("AuroraHosterBot")
@@ -34,19 +34,45 @@ SUDO_USERS = {Config.OWNER_ID}
 GBAN_LIST = {}
 APPROVED_USERS_PER_GROUP = {}
 BOT_GROUPS = {}
+main_bot_client = None
+gban_sync_lock = asyncio.Lock()
+
+
+def get_bot_client():
+    return main_bot_client
+
+
+def normalize_gban_target(target):
+    """
+    Normalizes a GBAN target string.
+    Strips leading '@', whitespace, and converts to lowercase.
+    Returns cleaned string e.g. 'not_your_type_0091' or '7814478731'.
+    """
+    if not target:
+        return ""
+    t_str = str(target).strip()
+    if t_str.startswith("@"):
+        t_str = t_str[1:]
+    return t_str.lower()
+
+
+RESERVED_GBAN_KEYWORDS = {"list", "gbanlist", "listgban", "help", "start", "cancel", "status", "stop"}
 
 
 def load_persistent_data():
-    """Loads persistent GBan, BlockedUsers, and BotGroups from database."""
+    """Loads persistent GBan, BlockedUsers, BotGroups, and ApprovedGroupUsers from database."""
     try:
         with db_session() as session:
             # Load Bot Groups
             for g in session.query(BotGroup).all():
                 BOT_GROUPS[g.group_id] = g.title or "Group"
 
-            # Load GBan Users
+            # Load GBan Users (deduplicated & normalized)
+            GBAN_LIST.clear()
             for gb in session.query(GBanUser).all():
-                GBAN_LIST[gb.target.lower()] = gb.reason
+                norm = normalize_gban_target(gb.target)
+                if norm and norm not in RESERVED_GBAN_KEYWORDS:
+                    GBAN_LIST[norm] = gb.reason
 
             # Load Blocked Users
             for bu in session.query(BlockedUser).all():
@@ -54,6 +80,12 @@ def load_persistent_data():
                 BLOCKED_USERS[bu.user_id] = info
                 if bu.username:
                     BLOCKED_USERS[bu.username.lower()] = info
+
+            # Load Approved Group Users
+            for ap in session.query(ApprovedGroupUser).all():
+                if ap.group_id not in APPROVED_USERS_PER_GROUP:
+                    APPROVED_USERS_PER_GROUP[ap.group_id] = set()
+                APPROVED_USERS_PER_GROUP[ap.group_id].add(ap.target.lower())
         LOGS.info(f"Loaded {len(BOT_GROUPS)} bot groups, {len(GBAN_LIST)} gban users, {len(BLOCKED_USERS)} blocked users from DB.")
     except Exception as e:
         LOGS.error(f"Error loading persistent DB data: {e}")
@@ -74,28 +106,230 @@ def save_bot_group(group_id: int, title: str):
         LOGS.error(f"Error saving BotGroup {group_id}: {e}")
 
 
+def remove_bot_group(group_id: int):
+    """Removes a group from DB and in-memory cache."""
+    BOT_GROUPS.pop(group_id, None)
+    try:
+        with db_session() as session:
+            session.query(BotGroup).filter(BotGroup.group_id == group_id).delete(synchronize_session=False)
+            session.commit()
+    except Exception as e:
+        LOGS.error(f"Error deleting BotGroup {group_id}: {e}")
+
+
+async def check_group_eligibility(client, chat_id):
+    """
+    Verifies if chat_id is a supported group/supergroup and client is an admin with ban_users rights.
+    Saves or removes from BOT_GROUPS DB accordingly.
+    """
+    if not client or not client.is_connected() or not chat_id:
+        return False, "Group", chat_id
+
+    try:
+        chat = await client.get_entity(chat_id)
+        is_group = getattr(chat, "group", False) or getattr(chat, "megagroup", False) or getattr(chat, "gigagroup", False)
+        if not is_group and hasattr(chat, "title"):
+            is_group = True
+
+        if not is_group:
+            remove_bot_group(chat_id)
+            return False, getattr(chat, "title", "Group"), chat_id
+
+        title = getattr(chat, "title", "Group") or "Group"
+        is_admin = False
+
+        if getattr(chat, "creator", False):
+            is_admin = True
+        elif getattr(chat, "admin_rights", None):
+            ar = chat.admin_rights
+            if getattr(ar, "ban_users", False) or getattr(ar, "change_info", False):
+                is_admin = True
+        else:
+            try:
+                p = await client.get_permissions(chat_id, "me")
+                if getattr(p, "is_admin", False) or getattr(p, "is_creator", False) or getattr(p, "ban_users", False):
+                    is_admin = True
+            except Exception:
+                pass
+
+        if is_admin:
+            save_bot_group(chat_id, title)
+            return True, title, chat_id
+        else:
+            remove_bot_group(chat_id)
+            return False, title, chat_id
+    except Exception as e:
+        LOGS.debug(f"Error checking group eligibility for {chat_id}: {e}")
+        return False, "Group", chat_id
+
+
+async def sync_new_group(client, group_id, group_title=None, notify_owner=True):
+    """
+    Synchronizes ALL existing GBAN users when a new eligible group is discovered/joined.
+    Outputs structured log.
+    """
+    async with gban_sync_lock:
+        is_elig, title, g_id = await check_group_eligibility(client, group_id)
+        if not is_elig:
+            return
+
+        group_title = group_title or title or "Group"
+        load_persistent_data()
+        gban_targets = list(GBAN_LIST.keys())
+
+        if not gban_targets:
+            sync_log = (
+                f"🛡️ **Global Ban Sync**\n\n"
+                f"📍 **Group:** {group_title}\n"
+                f"🆔 **ID:** `{g_id}`\n"
+                f"👥 **Existing Global Bans:** `0`\n"
+                f"ℹ️ *Nothing to synchronize.*"
+            )
+            LOGS.info(f"Global Ban Sync: Group {group_title} ({g_id}) - Nothing to synchronize.")
+            return sync_log
+
+        total = len(gban_targets)
+        newly_banned = 0
+        already_banned = 0
+        failed = 0
+
+        for target in gban_targets:
+            t_key = str(target).lower()
+            approved_set = APPROVED_USERS_PER_GROUP.get(g_id, set())
+            if (
+                t_key in approved_set or
+                (t_key.startswith("@") and t_key[1:] in approved_set) or
+                (f"@{t_key}" in approved_set)
+            ):
+                already_banned += 1
+                continue
+
+            success = await perform_group_ban(client, g_id, target)
+            if success:
+                newly_banned += 1
+            else:
+                failed += 1
+            await asyncio.sleep(0.2)
+
+        sync_log = (
+            f"🛡️ **Global Ban Sync**\n\n"
+            f"📍 **Group:** {group_title}\n"
+            f"🆔 **ID:** `{g_id}`\n"
+            f"👥 **Existing Global Bans:** `{total}`\n"
+            f"🚫 **Newly Banned:** `{newly_banned}`\n"
+            f"✅ **Already Banned:** `{already_banned}`\n"
+            f"❌ **Failed:** `{failed}`"
+        )
+        LOGS.info(f"Global Ban Sync for {group_title} ({g_id}): Total={total}, Newly={newly_banned}, Already={already_banned}, Failed={failed}")
+
+        if notify_owner and main_bot_client and Config.OWNER_ID:
+            try:
+                await main_bot_client.send_message(Config.OWNER_ID, sync_log)
+            except Exception:
+                pass
+
+        return sync_log
+
+
+async def reconcile_global_bans(client=None):
+    """
+    Reconciles all global bans across all currently eligible moderation groups.
+    Runs on startup and as a periodic background task.
+    """
+    if not client:
+        client = main_bot_client
+    if not client or not client.is_connected():
+        return
+
+    async with gban_sync_lock:
+        load_persistent_data()
+        gban_targets = list(GBAN_LIST.keys())
+        all_groups = await get_all_platform_groups(client)
+
+        for g_id in list(BOT_GROUPS.keys()):
+            if g_id not in all_groups:
+                remove_bot_group(g_id)
+
+        if not gban_targets or not all_groups:
+            return
+
+        for g_id, g_name in all_groups.items():
+            for target in gban_targets:
+                t_key = str(target).lower()
+                approved_set = APPROVED_USERS_PER_GROUP.get(g_id, set())
+                if (
+                    t_key in approved_set or
+                    (t_key.startswith("@") and t_key[1:] in approved_set) or
+                    (f"@{t_key}" in approved_set)
+                ):
+                    continue
+
+                await perform_group_ban(client, g_id, target)
+                await asyncio.sleep(0.1)
+
+
+async def refresh_bot_groups(client=None):
+    """
+    Refreshes group cache for bot/userbot safely.
+    For userbots, queries Telegram dialogs.
+    For bot account, relies on event-driven BOT_GROUPS tracking (as Telegram restricts bot get_dialogs).
+    """
+    if not client:
+        client = main_bot_client
+    if not client or not client.is_connected():
+        return
+    try:
+        me = await client.get_me()
+        if getattr(me, "bot", False):
+            return
+        
+        dialogs = await client.get_dialogs()
+        current_groups = {}
+        for d in dialogs:
+            if is_group_dialog(d):
+                current_groups[d.id] = d.name
+        return current_groups
+    except Exception as e:
+        LOGS.debug(f"Note refreshing bot groups: {e}")
+
+
 async def get_all_platform_groups(bot=None):
     """
-    Returns a dictionary of all groups {group_id: title} aggregated from:
-    1. Persistent DB records (BotGroup) & in-memory BOT_GROUPS
-    2. Active hosted userbots' dialogs
+    Returns a dictionary of all groups {group_id: title} where:
+    The Telegram Bot Account or active userbots have admin rights to manage/ban users.
     """
-    groups = {}
+    if bot:
+        await refresh_bot_groups(bot)
+    elif main_bot_client:
+        await refresh_bot_groups(main_bot_client)
 
-    # Load from DB & in-memory cache
+    groups = {}
     load_persistent_data()
+
+    # 1. Load Bot Account groups from BOT_GROUPS (saved via events & persistent DB)
     for g_id, name in BOT_GROUPS.items():
         groups[g_id] = name
 
-    # Aggregate active userbots dialogs
+    # 2. Add active Userbots' groups (only groups where userbot has admin rights or created group)
     for uid in session_manager.get_all_active_users():
         u_client = session_manager.get_active_client(uid)
         if u_client and u_client.is_connected():
             try:
                 async for dialog in u_client.iter_dialogs():
                     if is_group_dialog(dialog):
-                        groups[dialog.id] = dialog.name
-                        save_bot_group(dialog.id, dialog.name)
+                        is_admin = False
+                        ent = getattr(dialog, "entity", None)
+                        if ent:
+                            if getattr(ent, "creator", False):
+                                is_admin = True
+                            elif getattr(ent, "admin_rights", None):
+                                ar = ent.admin_rights
+                                if getattr(ar, "ban_users", False) or getattr(ar, "change_info", False):
+                                    is_admin = True
+                            elif dialog.id in BOT_GROUPS:
+                                is_admin = True
+                        if is_admin:
+                            groups[dialog.id] = dialog.name
             except Exception as e:
                 LOGS.error(f"Error fetching userbot {uid} dialogs: {e}")
 
@@ -123,6 +357,607 @@ async def resolve_target(client, target):
         return entity
     except Exception:
         return target_str
+
+
+async def execute_global_broadcast(msg_text, reply_msg=None, event=None):
+    """
+    Executes a global broadcast across ALL platform groups.
+    Attempts broadcast first via Telegram Bot Account, then via active Userbots for remaining groups.
+    """
+    all_groups = await get_all_platform_groups(main_bot_client)
+    total_groups = len(all_groups)
+
+    if total_groups == 0:
+        return "ℹ️ **No active groups recorded across platform.**"
+
+    sent_bot = 0
+    sent_ub = 0
+    sent_chat_ids = set()
+
+    # 1. Attempt broadcast via Bot Account to known BOT_GROUPS
+    b_client = main_bot_client
+    if b_client and b_client.is_connected():
+        load_persistent_data()
+        for g_id in list(BOT_GROUPS.keys()):
+            try:
+                if reply_msg:
+                    await b_client.send_message(g_id, reply_msg)
+                else:
+                    await b_client.send_message(g_id, msg_text)
+                sent_bot += 1
+                sent_chat_ids.add(g_id)
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                LOGS.debug(f"Bot failed to send broadcast to group {g_id}: {e}")
+
+    # 2. Attempt broadcast via Hosted Userbots for remaining groups in all_groups
+    active_users = session_manager.get_all_active_users()
+    for uid in active_users:
+        u_client = session_manager.get_active_client(uid)
+        if u_client and u_client.is_connected():
+            try:
+                async for dialog in u_client.iter_dialogs():
+                    if is_group_dialog(dialog) and dialog.id not in sent_chat_ids:
+                        g_id = dialog.id
+                        try:
+                            if reply_msg:
+                                await u_client.send_message(g_id, reply_msg)
+                            else:
+                                await u_client.send_message(g_id, msg_text)
+                            sent_ub += 1
+                            sent_chat_ids.add(g_id)
+                            await asyncio.sleep(0.3)
+                        except Exception as e:
+                            LOGS.debug(f"Userbot {uid} failed to send broadcast to group {g_id}: {e}")
+            except Exception as e:
+                LOGS.error(f"Error executing userbot broadcast for {uid}: {e}")
+
+    total_sent = len(sent_chat_ids)
+    failed = max(0, total_groups - total_sent)
+
+    res = (
+        f"📢 **Global Broadcast Complete!**\n\n"
+        f"🤖 **Sent by Bot Account in:** `{sent_bot}` groups\n"
+        f"⚡ **Sent by Hosted Userbots in:** `{sent_ub}` groups\n"
+        f"❌ **Failed in:** `{failed}` groups\n"
+        f"📊 **Total Groups Broadcasted:** `{total_sent}` / `{total_groups}` groups"
+    )
+    return res
+
+
+async def perform_group_ban(client, group_id, raw_target, resolved_entity=None, numeric_id=None, norm_username=None):
+    """
+    Attempts to ban a target in group_id using client (bot or userbot).
+    """
+    target_to_use = resolved_entity or (numeric_id if numeric_id else raw_target)
+    
+    try:
+        await client.edit_permissions(group_id, target_to_use, view_messages=False)
+        return True
+    except Exception:
+        try:
+            await client.kick_participant(group_id, target_to_use)
+            return True
+        except Exception:
+            pass
+
+    if numeric_id or norm_username:
+        try:
+            search_query = str(numeric_id) if numeric_id else norm_username
+            participants = await client.get_participants(group_id, search=search_query)
+            for p in participants:
+                if (numeric_id and p.id == numeric_id) or (norm_username and p.username and p.username.lower() == norm_username):
+                    try:
+                        await client.edit_permissions(group_id, p, view_messages=False)
+                        return True
+                    except Exception:
+                        try:
+                            await client.kick_participant(group_id, p)
+                            return True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+    return False
+
+
+async def perform_group_unban(client, group_id, raw_target, resolved_entity=None, numeric_id=None, norm_username=None):
+    """
+    Attempts to unban a target in group_id using client (bot or userbot).
+    """
+    target_to_use = resolved_entity or (numeric_id if numeric_id else raw_target)
+    
+    try:
+        await client.edit_permissions(group_id, target_to_use, view_messages=True, send_messages=True)
+        return True
+    except Exception:
+        if numeric_id or norm_username:
+            try:
+                search_query = str(numeric_id) if numeric_id else norm_username
+                participants = await client.get_participants(group_id, search=search_query)
+                for p in participants:
+                    if (numeric_id and p.id == numeric_id) or (norm_username and p.username and p.username.lower() == norm_username):
+                        try:
+                            await client.edit_permissions(group_id, p, view_messages=True, send_messages=True)
+                            return True
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    return False
+
+
+async def resolve_gban_event_target(client, event, input_str):
+    """
+    Extracts target string, target entity, and ban reason from event and input_str.
+    Handles:
+    - Reply to a message in group or DM (with or without optional reason)
+    - Explicit @username or user_id argument (with optional reason)
+    - DM chat partner if command typed in DM without reply and without target argument
+    """
+    reply = await event.get_reply_message()
+    target_str = None
+    target_entity = None
+    reason = "Globally Banned by Admin"
+
+    if reply:
+        try:
+            target_entity = await reply.get_sender()
+        except Exception:
+            pass
+
+        if input_str:
+            parts = input_str.strip().split(maxsplit=1)
+            first = parts[0]
+            if first.startswith("@") or first.lstrip("-").isdigit():
+                target_str = first
+                target_entity = None
+                if len(parts) > 1:
+                    reason = parts[1]
+            else:
+                target_str = str(reply.sender_id) if reply.sender_id else (str(getattr(target_entity, "id", "")) if target_entity else None)
+                reason = input_str.strip()
+        else:
+            target_str = str(reply.sender_id) if reply.sender_id else (str(getattr(target_entity, "id", "")) if target_entity else None)
+    elif input_str:
+        parts = input_str.strip().split(maxsplit=1)
+        target_str = parts[0]
+        if len(parts) > 1:
+            reason = parts[1]
+    elif getattr(event, "is_private", False):
+        try:
+            target_entity = await event.get_chat()
+            if target_entity:
+                target_str = str(target_entity.id)
+        except Exception:
+            target_str = str(event.chat_id)
+
+    if not target_entity and target_str and client:
+        try:
+            from aurora.plugins.utility import get_user_entity_robust
+            target_entity = await get_user_entity_robust(client, target_str)
+        except Exception:
+            pass
+
+    return target_str, target_entity, reason
+
+
+async def resolve_gunban_event_target(client, event, input_str):
+    """
+    Extracts target string and target entity for GUNBAN.
+    """
+    reply = await event.get_reply_message()
+    target_str = None
+    target_entity = None
+
+    if reply:
+        try:
+            target_entity = await reply.get_sender()
+        except Exception:
+            pass
+
+        if input_str:
+            first = input_str.strip().split()[0]
+            if first.startswith("@") or first.lstrip("-").isdigit():
+                target_str = first
+                target_entity = None
+            else:
+                target_str = str(reply.sender_id) if reply.sender_id else (str(getattr(target_entity, "id", "")) if target_entity else None)
+        else:
+            target_str = str(reply.sender_id) if reply.sender_id else (str(getattr(target_entity, "id", "")) if target_entity else None)
+    elif input_str:
+        target_str = input_str.strip().split()[0]
+    elif getattr(event, "is_private", False):
+        try:
+            target_entity = await event.get_chat()
+            if target_entity:
+                target_str = str(target_entity.id)
+        except Exception:
+            target_str = str(event.chat_id)
+
+    if not target_entity and target_str and client:
+        try:
+            from aurora.plugins.utility import get_user_entity_robust
+            target_entity = await get_user_entity_robust(client, target_str)
+        except Exception:
+            pass
+
+    return target_str, target_entity
+
+
+async def execute_global_ban(raw_target, target_entity=None, reason="Globally Banned by Admin"):
+    """
+    Executes a Global Ban across ALL platform groups.
+    Supports user IDs, @usernames, target entities, and un-prefixed usernames.
+    """
+    async with gban_sync_lock:
+        if hasattr(raw_target, "id"):
+            target_entity = raw_target
+            raw_target = str(raw_target.id)
+
+        raw_target_str = str(raw_target).strip()
+        t_norm = normalize_gban_target(raw_target_str)
+        if not t_norm or t_norm in RESERVED_GBAN_KEYWORDS:
+            return "❌ **Invalid target.** Specify a valid @username or user ID to GBAN."
+
+    all_groups = await get_all_platform_groups(main_bot_client)
+    total_groups = len(all_groups)
+
+    b_client = main_bot_client
+
+    # Resolve target details
+    resolved_entity = target_entity
+    numeric_id = int(t_norm) if t_norm.lstrip("-").isdigit() else None
+    norm_username = raw_target_str[1:].lower() if raw_target_str.startswith("@") else (t_norm.lower() if not t_norm.lstrip("-").isdigit() else None)
+
+    if resolved_entity:
+        if hasattr(resolved_entity, "id"):
+            numeric_id = resolved_entity.id
+        if hasattr(resolved_entity, "username") and resolved_entity.username:
+            norm_username = resolved_entity.username.lower()
+
+    if not norm_username and b_client and b_client.is_connected():
+        try:
+            from aurora.plugins.utility import get_user_entity_robust
+            ent = await get_user_entity_robust(b_client, raw_target_str)
+            if ent:
+                resolved_entity = ent
+                if hasattr(ent, "id"):
+                    numeric_id = ent.id
+                if hasattr(ent, "username") and ent.username:
+                    norm_username = ent.username.lower()
+        except Exception:
+            pass
+
+    # Record in GBAN_LIST (save both username and ID if available)
+    if t_norm:
+        GBAN_LIST[t_norm] = reason
+    if norm_username:
+        GBAN_LIST[norm_username] = reason
+        GBAN_LIST[f"@{norm_username}"] = reason
+    if numeric_id:
+        GBAN_LIST[str(numeric_id)] = reason
+
+    # Persist in DB
+    try:
+        with db_session() as session:
+            existing = session.query(GBanUser).filter(GBanUser.target == t_norm).first()
+            if not existing:
+                session.add(GBanUser(target=t_norm, reason=reason))
+            else:
+                existing.reason = reason
+            if numeric_id and str(numeric_id) != t_norm:
+                existing_id = session.query(GBanUser).filter(GBanUser.target == str(numeric_id)).first()
+                if not existing_id:
+                    session.add(GBanUser(target=str(numeric_id), reason=reason))
+            session.commit()
+    except Exception as e:
+        LOGS.error(f"Error persisting GBanUser: {e}")
+
+    banned_bot = 0
+    banned_ub = 0
+    banned_groups = set()
+
+    # 1. Ban via Bot Account
+    if b_client and b_client.is_connected():
+        load_persistent_data()
+        for g_id in list(BOT_GROUPS.keys()):
+            success = await perform_group_ban(b_client, g_id, raw_target_str, resolved_entity, numeric_id, norm_username)
+            if success:
+                banned_bot += 1
+                banned_groups.add(g_id)
+
+    # 2. Ban via Active Hosted Userbots
+    active_users = session_manager.get_all_active_users()
+    for uid in active_users:
+        u_client = session_manager.get_active_client(uid)
+        if u_client and u_client.is_connected():
+            try:
+                ub_entity = resolved_entity
+                if not ub_entity:
+                    try:
+                        from aurora.plugins.utility import get_user_entity_robust
+                        ub_entity = await get_user_entity_robust(u_client, raw_target_str)
+                    except Exception:
+                        pass
+
+                async for dialog in u_client.iter_dialogs():
+                    if is_group_dialog(dialog) and dialog.id in all_groups and dialog.id not in banned_groups:
+                        g_id = dialog.id
+                        success = await perform_group_ban(u_client, g_id, raw_target_str, ub_entity, numeric_id, norm_username)
+                        if success:
+                            banned_ub += 1
+                            banned_groups.add(g_id)
+            except Exception as e:
+                LOGS.error(f"Error executing userbot GBAN for {uid}: {e}")
+
+    total_banned = len(banned_groups)
+    failed = max(0, total_groups - total_banned)
+    formatted_target = f"@{norm_username}" if norm_username else (raw_target_str if raw_target_str.startswith("@") else (str(numeric_id) if numeric_id else t_norm))
+
+    res = (
+        f"🚫 **Global Ban Executed!**\n\n"
+        f"👤 **Target:** `{formatted_target}`\n"
+        f"🤖 **Banned by Bot Account in:** `{banned_bot}` groups\n"
+        f"⚡ **Banned by Hosted Userbots in:** `{banned_ub}` groups\n"
+        f"❌ **Failed / No Admin Rights in:** `{failed}` groups\n"
+        f"📊 **Total Groups Banned:** `{total_banned}` / `{total_groups}` groups\n"
+        f"📝 **Reason:** `{reason}`\n\n"
+        f"🛡️ *Target is saved in DB and will be auto-banned instantly if they message in any group where bot/userbots have admin rights.*"
+    )
+    return res
+
+
+async def execute_global_unban(raw_target, target_entity=None):
+    """
+    Executes a Global Unban across ALL platform groups.
+    """
+    async with gban_sync_lock:
+        if hasattr(raw_target, "id"):
+            target_entity = raw_target
+            raw_target = str(raw_target.id)
+
+        raw_target_str = str(raw_target).strip()
+        t_norm = normalize_gban_target(raw_target_str)
+        if not t_norm or t_norm in RESERVED_GBAN_KEYWORDS:
+            return "❌ **Invalid target.** Specify a valid @username or user ID to GUNBAN."
+
+    all_groups = await get_all_platform_groups(main_bot_client)
+    total_groups = len(all_groups)
+
+    b_client = main_bot_client
+    resolved_entity = target_entity
+    numeric_id = int(t_norm) if t_norm.lstrip("-").isdigit() else None
+    norm_username = raw_target_str[1:].lower() if raw_target_str.startswith("@") else (t_norm.lower() if not t_norm.lstrip("-").isdigit() else None)
+
+    if resolved_entity:
+        if hasattr(resolved_entity, "id"):
+            numeric_id = resolved_entity.id
+        if hasattr(resolved_entity, "username") and resolved_entity.username:
+            norm_username = resolved_entity.username.lower()
+
+    if not norm_username and b_client and b_client.is_connected():
+        try:
+            from aurora.plugins.utility import get_user_entity_robust
+            ent = await get_user_entity_robust(b_client, raw_target_str)
+            if ent:
+                resolved_entity = ent
+                if hasattr(ent, "id"):
+                    numeric_id = ent.id
+                if hasattr(ent, "username") and ent.username:
+                    norm_username = ent.username.lower()
+        except Exception:
+            pass
+
+    # Remove from memory GBAN_LIST
+    GBAN_LIST.pop(t_norm, None)
+    if norm_username:
+        GBAN_LIST.pop(norm_username, None)
+        GBAN_LIST.pop(f"@{norm_username}", None)
+    if numeric_id:
+        GBAN_LIST.pop(str(numeric_id), None)
+
+    # Persist deletion in DB
+    try:
+        with db_session() as session:
+            session.query(GBanUser).filter(
+                (GBanUser.target == t_norm) |
+                (GBanUser.target == f"@{t_norm}") |
+                (GBanUser.target == str(numeric_id) if numeric_id else False)
+            ).delete(synchronize_session=False)
+            session.commit()
+    except Exception as e:
+        LOGS.error(f"Error deleting GBanUser DB record: {e}")
+
+    unbanned_bot = 0
+    unbanned_ub = 0
+    unbanned_groups = set()
+
+    # 1. Unban via Bot Account
+    if b_client and b_client.is_connected():
+        load_persistent_data()
+        for g_id in list(BOT_GROUPS.keys()):
+            success = await perform_group_unban(b_client, g_id, raw_target_str, resolved_entity, numeric_id, norm_username)
+            if success:
+                unbanned_bot += 1
+                unbanned_groups.add(g_id)
+
+    # 2. Unban via Active Hosted Userbots
+    active_users = session_manager.get_all_active_users()
+    for uid in active_users:
+        u_client = session_manager.get_active_client(uid)
+        if u_client and u_client.is_connected():
+            try:
+                ub_entity = resolved_entity
+                if not ub_entity:
+                    try:
+                        from aurora.plugins.utility import get_user_entity_robust
+                        ub_entity = await get_user_entity_robust(u_client, raw_target_str)
+                    except Exception:
+                        pass
+
+                async for dialog in u_client.iter_dialogs():
+                    if is_group_dialog(dialog) and dialog.id in all_groups and dialog.id not in unbanned_groups:
+                        g_id = dialog.id
+                        success = await perform_group_unban(u_client, g_id, raw_target_str, ub_entity, numeric_id, norm_username)
+                        if success:
+                            unbanned_ub += 1
+                            unbanned_groups.add(g_id)
+            except Exception as e:
+                LOGS.error(f"Error executing userbot GUNBAN for {uid}: {e}")
+
+    total_unbanned = len(unbanned_groups)
+    failed = max(0, total_groups - total_unbanned)
+    formatted_target = f"@{norm_username}" if norm_username else (raw_target_str if raw_target_str.startswith("@") else (str(numeric_id) if numeric_id else t_norm))
+
+    res = (
+        f"✅ **Global Unban Executed!**\n\n"
+        f"👤 **Target:** `{formatted_target}`\n"
+        f"🤖 **Unbanned by Bot Account in:** `{unbanned_bot}` groups\n"
+        f"⚡ **Unbanned by Hosted Userbots in:** `{unbanned_ub}` groups\n"
+        f"❌ **Failed / No Admin Rights in:** `{failed}` groups\n"
+        f"📊 **Total Groups Unbanned:** `{total_unbanned}` / `{total_groups}` groups"
+    )
+    return res
+
+
+async def get_formatted_gban_list(client=None):
+    """
+    Returns formatted GBAN list in format: name(user id) - banned by
+    """
+    load_persistent_data()
+    if not GBAN_LIST:
+        return "ℹ️ **No users currently globally banned.**"
+
+    if client is None:
+        client = main_bot_client
+
+    seen_keys = set()
+    entries = []
+
+    for target, reason in GBAN_LIST.items():
+        t_clean = str(target).lower().strip()
+        if t_clean in seen_keys or t_clean in RESERVED_GBAN_KEYWORDS:
+            continue
+
+        entity = None
+        user_id = "Unknown"
+        name = None
+        username = None
+
+        if t_clean.isdigit() or (t_clean.startswith("-") and t_clean[1:].isdigit()):
+            user_id = t_clean
+        else:
+            username = f"@{t_clean}" if not t_clean.startswith("@") else t_clean
+
+        if client and client.is_connected():
+            try:
+                entity = await client.get_entity(target)
+                if entity:
+                    user_id = str(getattr(entity, "id", user_id))
+                    u_name = getattr(entity, "first_name", None) or ""
+                    l_name = getattr(entity, "last_name", None) or ""
+                    full_n = f"{u_name} {l_name}".strip()
+                    if full_n:
+                        name = full_n
+                    if getattr(entity, "username", None):
+                        username = f"@{entity.username}"
+            except Exception:
+                pass
+
+        if not name:
+            name = username if username else f"User {user_id}"
+
+        dedup_key = user_id if user_id != "Unknown" else (username.lower() if username else t_clean)
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+        seen_keys.add(t_clean)
+
+        entries.append(f"• {name}({user_id}) - {reason}")
+
+    if not entries:
+        return "ℹ️ **No users currently globally banned.**"
+
+    res = f"🚫 **Globally Banned Users List (`{len(entries)}` users):**\n\n"
+    res += "\n".join(entries)
+    return res
+
+
+async def get_formatted_admin_list(client=None):
+    """
+    Returns formatted Admin/Sudo list in format: name(user id)
+    """
+    load_persistent_data()
+
+    if client is None:
+        client = main_bot_client
+
+    admins = set()
+    if Config.OWNER_ID:
+        admins.add(Config.OWNER_ID)
+    for u in SUDO_USERS:
+        admins.add(u)
+
+    try:
+        with db_session() as session:
+            for db_u in session.query(User).filter(User.role.in_(["owner", "admin"])).all():
+                admins.add(db_u.telegram_id)
+    except Exception:
+        pass
+
+    seen_keys = set()
+    entries = []
+
+    for target in admins:
+        t_clean = str(target).strip()
+        if t_clean in seen_keys or not t_clean:
+            continue
+
+        entity = None
+        user_id = "Unknown"
+        name = None
+        username = None
+
+        if t_clean.isdigit() or (t_clean.startswith("-") and t_clean[1:].isdigit()):
+            user_id = t_clean
+        else:
+            username = f"@{t_clean}" if not t_clean.startswith("@") else t_clean
+
+        if client and client.is_connected():
+            try:
+                entity = await client.get_entity(target)
+                if entity:
+                    user_id = str(getattr(entity, "id", user_id))
+                    u_name = getattr(entity, "first_name", None) or ""
+                    l_name = getattr(entity, "last_name", None) or ""
+                    full_n = f"{u_name} {l_name}".strip()
+                    if full_n:
+                        name = full_n
+                    if getattr(entity, "username", None):
+                        username = f"@{entity.username}"
+            except Exception:
+                pass
+
+        if not name:
+            name = username if username else f"Admin {user_id}"
+
+        dedup_key = user_id if user_id != "Unknown" else (username.lower() if username else t_clean)
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+        seen_keys.add(t_clean)
+
+        entries.append(f"• {name}({user_id})")
+
+    if not entries:
+        entries.append(f"• Owner({Config.OWNER_ID})")
+
+    res = f"👑 **Sudo / Admin Users List (`{len(entries)}` admins):**\n\n"
+    res += "\n".join(entries)
+    return res
 
 WELCOME_TEXT = """🌟 **Welcome To The Premium Aurora Userbot Platform!** 🌟
 
@@ -343,24 +1178,30 @@ CATEGORIES_INFO = {
         "🔹 `.antisafe on/off` - Turn on/off hardcore DM protection"
     ),
     "cat_approve": (
-        "✨ **Approve Checkmark Commands** ✨\n"
+        "✨ **Approve & GBan Exemption Commands** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 `.approve` - Save user from AntiSafe deletion\n"
-        "🔹 `.disapprove` - Disapprove user for PM"
+        "📩 **DM AntiSafe Approval:**\n"
+        "🔹 `.approve` - Save user from AntiSafe DM deletion\n"
+        "🔹 `.disapprove` - Remove user DM approval\n\n"
+        "👥 **Group GBan Exemption:**\n"
+        "🔹 `.gapprove <@username/id>` (or `/gapprove`) - Exempt user from GBAN auto-ban in THIS group only\n"
+        "🔹 `.gdisapprove <@username/id>` (or `/gdisapprove`) - Remove GBAN exemption for THIS group"
+    ),
+    "cat_clone": (
+        "✨ **Profile Clone & Revert 🎭 Commands** ✨\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔹 `.clone <@username/reply>`\n"
+        "📝 **Description:** Clone a user's profile name, bio, photo, and username (+1).\n"
+        "💡 **Example:** `.clone @username`\n\n"
+        "🔹 `.dclone` / `.revert`\n"
+        "📝 **Description:** Restore your original profile photo, name, bio, and username.\n"
+        "💡 **Example:** `.revert`"
     ),
     "cat_autoreply": (
         "✨ **AutoReply Robot Commands** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.autoreply <message>` - Mention/tag automatic reply\n"
         "🔹 `.dautoreply` - Disable tag auto reply"
-    ),
-    "cat_music": (
-        "✨ **Music & Voice 🎵 Commands** ✨\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 `.play <song>` / `.vcplay <song>`: Stream live music in Group Voice Chat.\n"
-        "🔹 `.vcpause` / `.pause`: Pause live VC audio stream.\n"
-        "🔹 `.vcresume` / `.resume`: Resume live VC audio stream.\n"
-        "🔹 `.vcleave` / `.vcstop` / `.leavevc`: Stop music & leave the Voice Chat call."
     )
 }
 
@@ -369,12 +1210,26 @@ def get_commands_keyboard():
     return [
         [Button.inline("📨 Spam", data="cat_spam"), Button.inline("⏰ Timed Spam", data="cat_tspam"), Button.inline("💥 Raid", data="cat_raid")],
         [Button.inline("🔥 Abusive Raid", data="cat_araid"), Button.inline("💌 Shayari Raid", data="cat_sraid"), Button.inline("🎯 Reply Raid", data="cat_rraid")],
-        [Button.inline("🎵 Music & Voice", data="cat_music"), Button.inline("🔔 Tagging", data="cat_tagging"), Button.inline("🎉 Welcome", data="cat_welcome")],
-        [Button.inline("🚫 Moderation", data="cat_mod"), Button.inline("😂 Fun", data="cat_fun"), Button.inline("✍️ Customization", data="cat_custom")],
-        [Button.inline("👑 Owner", data="cat_owner"), Button.inline("🔧 Admin", data="cat_admin"), Button.inline("💾 Save Disappearing", data="cat_save")],
-        [Button.inline("📢 Broadcast", data="cat_bcast"), Button.inline("🛡️ AntiSafe", data="cat_antisafe"), Button.inline("✅ Approve", data="cat_approve")],
-        [Button.inline("⚡ CRAID", data="cat_craid"), Button.inline("🤖 AutoReply", data="cat_autoreply"), Button.inline("ℹ️ General", data="cat_gen")],
+        [Button.inline("🔔 Tagging", data="cat_tagging"), Button.inline("🎉 Welcome", data="cat_welcome"), Button.inline("🚫 Moderation", data="cat_mod")],
+        [Button.inline("😂 Fun", data="cat_fun"), Button.inline("✍️ Customization", data="cat_custom"), Button.inline("💾 Save Disappearing", data="cat_save")],
+        [Button.inline("👑 Owner", data="cat_owner"), Button.inline("🔧 Admin", data="cat_admin"), Button.inline("📢 Broadcast", data="cat_bcast")],
+        [Button.inline("🛡️ AntiSafe", data="cat_antisafe"), Button.inline("✅ Approve", data="cat_approve"), Button.inline("⚡ CRAID", data="cat_craid")],
+        [Button.inline("🤖 AutoReply", data="cat_autoreply"), Button.inline("🎭 Profile Clone", data="cat_clone"), Button.inline("ℹ️ General", data="cat_gen")],
     ]
+
+
+async def start_periodic_reconciliation():
+    """Starts background periodic reconciliation task running every 10 minutes."""
+    while True:
+        try:
+            await asyncio.sleep(600)  # Every 10 minutes
+            if main_bot_client and main_bot_client.is_connected():
+                await reconcile_global_bans(main_bot_client)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            LOGS.error(f"Error in periodic reconciliation loop: {e}")
+            await asyncio.sleep(60)
 
 
 async def start_aurora_bot():
@@ -383,17 +1238,37 @@ async def start_aurora_bot():
         LOGS.error("TG_BOT_TOKEN not configured.")
         return
 
+    from telethon.sessions import SQLiteSession
+    from telethon.errors import FloodWaitError
+
     bot = TelegramClient(
-        MemorySession(),
+        SQLiteSession("aurora_hoster_bot"),
         Config.API_ID,
         Config.API_HASH,
         auto_reconnect=True,
         connection_retries=None,
         retry_delay=5,
     )
-    await bot.start(bot_token=token)
+    await bot.connect()
+    if not await bot.is_user_authorized():
+        try:
+            await bot.start(bot_token=token)
+        except FloodWaitError as e:
+            LOGS.warning(f"Telegram FloodWait for Bot Token: Waiting {e.seconds} seconds...")
+            await asyncio.sleep(e.seconds + 2)
+            await bot.start(bot_token=token)
+
+    global main_bot_client
+    main_bot_client = bot
 
     load_persistent_data()
+    try:
+        asyncio.create_task(reconcile_global_bans(bot))
+    except Exception as e:
+        LOGS.error(f"Error launching global ban reconciliation on startup: {e}")
+
+    # Launch periodic reconciliation loop
+    asyncio.create_task(start_periodic_reconciliation())
 
     bot_me = await bot.get_me()
     print(f"\n[+] Aurora Platform Bot RUNNING as @{bot_me.username}!")
@@ -401,11 +1276,65 @@ async def start_aurora_bot():
     @bot.on(events.ChatAction)
     async def chat_action_handler(event):
         if event.is_group or (event.is_channel and getattr(event.chat, "megagroup", False)):
-            try:
-                title = getattr(event.chat, "title", "Group") or "Group"
-                save_bot_group(event.chat_id, title)
-            except Exception:
-                pass
+            title = getattr(event.chat, "title", "Group") or "Group"
+            if event.user_left or event.user_kicked:
+                try:
+                    left_user = await event.get_user()
+                    if left_user and left_user.id == bot_me.id:
+                        remove_bot_group(event.chat_id)
+                        return
+                except Exception:
+                    pass
+
+            if event.user_joined or event.user_added:
+                try:
+                    joined_user = await event.get_user()
+                    if joined_user and joined_user.id == bot_me.id:
+                        # Bot was added to group -> Auto sync!
+                        asyncio.create_task(sync_new_group(bot, event.chat_id, title))
+                        return
+                except Exception:
+                    pass
+                try:
+                    user = await event.get_user()
+                    if user:
+                        u_id_str = str(user.id)
+                        uname = getattr(user, "username", None) or ""
+                        uname_key = f"@{uname.lower()}" if uname else ""
+
+                        is_gbanned = (
+                            u_id_str in GBAN_LIST or
+                            (uname and uname.lower() in GBAN_LIST) or
+                            (uname_key and uname_key in GBAN_LIST)
+                        )
+                        if is_gbanned:
+                            approved_set = APPROVED_USERS_PER_GROUP.get(event.chat_id, set())
+                            if (
+                                u_id_str in approved_set or
+                                (uname_key and uname_key in approved_set) or
+                                (uname and uname.lower() in approved_set)
+                            ):
+                                return  # Exempted in this group!
+
+                            # Re-ban gbanned user who entered/was unbanned by local admin
+                            try:
+                                await bot.edit_permissions(event.chat_id, user.id, view_messages=False)
+                            except Exception:
+                                try:
+                                    await bot.kick_participant(event.chat_id, user.id)
+                                except Exception:
+                                    pass
+
+                            try:
+                                await event.respond(
+                                    f"🚫 **GBANNED User Detected & Auto-Banned!**\n\n"
+                                    f"👤 **User:** `{u_id_str}` ({uname_key or uname})\n"
+                                    f"⚠️ *This user is globally banned across Aurora network. Unbanning by local admin overridden.*"
+                                )
+                            except Exception:
+                                pass
+                except Exception as e:
+                    LOGS.error(f"Error in chat_action GBAN check: {e}")
 
     @bot.on(events.NewMessage)
     async def group_moderation_handler(event):
@@ -419,52 +1348,20 @@ async def start_aurora_bot():
             pass
 
         text = (event.raw_text or "").strip()
-
-        # Command: /approve (used in group by group admins / owner)
-        if text.startswith("/approve"):
-            reply = await event.get_reply_message()
-            parts = text.replace("/approve", "").strip().split()
-            target = parts[0] if parts else None
-
-            if not target and reply:
-                target = str(reply.sender_id)
-
-            if not target:
-                await event.reply("💡 **Usage:** Reply to a user or type `/approve <@username or user_id>`")
-                return
-
-            # Permission check: Group Admin, Owner, or Sudo User
-            is_allowed = (event.sender_id == Config.OWNER_ID or event.sender_id in SUDO_USERS or str(event.sender_id) in SUDO_USERS)
-            if not is_allowed:
-                try:
-                    p = await bot.get_permissions(event.chat_id, event.sender_id)
-                    if p.is_admin:
-                        is_allowed = True
-                except Exception:
-                    pass
-
-            if not is_allowed:
-                await event.reply("⛔ **Group Admin privileges required to approve users!**")
-                return
-
-            if event.chat_id not in APPROVED_USERS_PER_GROUP:
-                APPROVED_USERS_PER_GROUP[event.chat_id] = set()
-
-            t_key = str(target).lower()
-            APPROVED_USERS_PER_GROUP[event.chat_id].add(t_key)
-            await event.reply(
-                f"✅ **User Approved for this Group!**\n\n"
-                f"👤 **Target:** `{target}`\n"
-                f"🛡️ *This user will NOT be auto-banned by GBAN in this group.*"
-            )
+        if not text:
             return
 
-        # Auto-ban GBANNED users when they send a message in group (if bot has ban rights)
-        sender_id_str = str(event.sender_id)
-        sender_obj = await event.get_sender()
+        sender_id = event.sender_id
+        sender_id_str = str(sender_id)
+        sender_obj = None
+        try:
+            sender_obj = await event.get_sender()
+        except Exception:
+            pass
         uname = getattr(sender_obj, "username", None) or ""
         uname_key = f"@{uname.lower()}" if uname else ""
 
+        # Auto-ban GBANNED users when they send a message in group
         is_gbanned = (
             sender_id_str in GBAN_LIST or
             (uname and uname.lower() in GBAN_LIST) or
@@ -473,26 +1370,250 @@ async def start_aurora_bot():
 
         if is_gbanned:
             approved_set = APPROVED_USERS_PER_GROUP.get(event.chat_id, set())
-            if (
+            if not (
                 sender_id_str in approved_set or
                 (uname_key and uname_key in approved_set) or
                 (uname and uname.lower() in approved_set)
             ):
-                return  # Exempted in this group!
-
-            try:
-                bot_me = await bot.get_me()
-                perms = await bot.get_permissions(event.chat_id, bot_me)
-                if perms.is_admin and getattr(perms, "ban_users", False):
+                try:
                     await event.delete()
-                    await bot.edit_permissions(event.chat_id, event.sender_id, view_messages=False)
+                except Exception:
+                    pass
+
+                try:
+                    await bot.edit_permissions(event.chat_id, sender_id, view_messages=False)
                     await event.respond(
                         f"🚫 **GBANNED User Auto-Banned!**\n\n"
                         f"👤 **User:** `{sender_id_str}` ({uname_key or uname})\n"
-                        f"⚠️ *This user is globally banned on Aurora network.*"
+                        f"⚠️ *This user is globally banned across Aurora network. Group admins can use `.gapprove` to allow them in this group.*"
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
+                return
+
+        # Check for command execution in groups (commands starting with . or /)
+        if text.startswith(".") or text.startswith("/"):
+            first_word = text.split()[0].lower()
+            cmd = first_word[1:] if len(first_word) > 1 else ""
+            if not cmd:
+                return
+
+            is_owner_admin = (sender_id == Config.OWNER_ID or sender_id in SUDO_USERS or sender_id_str in SUDO_USERS)
+
+            # Owner & Bot Admin commands (Strictly restricted)
+            OWNER_ADMIN_COMMANDS = {
+                "gban", "gunban", "gbanlist", "listgban",
+                "addsudo", "addsudousers", "rmsudo", "removesodousers", "removesudouser",
+                "listsudousers", "sudolist", "adminlist",
+                "listgroups", "gbroadcast", "gcast",
+                "restartall", "refresh",
+                "block", "unblock", "blockeduser", "listblock"
+            }
+
+            if cmd in OWNER_ADMIN_COMMANDS:
+                if not is_owner_admin:
+                    await event.reply("⛔ **Access Denied!** Owner & Bot Admin commands are restricted to platform admins only.")
+                    return
+
+                # Execute Owner / Bot Admin command in group for authorized admins
+                if cmd in ["listsudousers", "sudolist", "adminlist"]:
+                    res = await get_formatted_admin_list(bot)
+                    await event.reply(res)
+                    return
+                elif cmd in ["listgban", "gbanlist"]:
+                    res = await get_formatted_gban_list(bot)
+                    await event.reply(res)
+                    return
+                elif cmd == "gban":
+                    input_str = text[len(first_word):].strip()
+                    raw_target, target_entity, reason = await resolve_gban_event_target(bot, event, input_str)
+                    if not raw_target:
+                        await event.reply("💡 **Usage:** `.gban <@username or user_id> [reason]` or reply to user")
+                        return
+                    msg = await event.reply(f"⚡ **Initiating Global Ban for:** `{raw_target}`...")
+                    res = await execute_global_ban(raw_target, target_entity=target_entity, reason=reason)
+                    await msg.edit(res)
+                    return
+                elif cmd == "gunban":
+                    input_str = text[len(first_word):].strip()
+                    target, target_entity = await resolve_gunban_event_target(bot, event, input_str)
+                    if not target:
+                        await event.reply("💡 **Usage:** `.gunban <@username or user_id>` or reply to user")
+                        return
+                    msg = await event.reply(f"⚡ **Initiating Global Unban for:** `{target}`...")
+                    res = await execute_global_unban(target, target_entity=target_entity)
+                    await msg.edit(res)
+                    return
+                elif cmd in ["gbroadcast", "gcast"]:
+                    reply = await event.get_reply_message()
+                    msg_text = text[len(first_word):].strip()
+                    if not msg_text and reply:
+                        msg_text = reply.text or reply.message
+                    if not msg_text:
+                        await event.reply("💡 **Usage:** `.gbroadcast <message>` or reply to a message")
+                        return
+                    msg = await event.reply("📢 **Sending Global Broadcast across Aurora platform...**")
+                    res = await execute_global_broadcast(msg_text, reply_msg=reply, event=event)
+                    await msg.edit(res)
+                    return
+                elif cmd == "listgroups":
+                    msg = await event.reply("⏳ **Fetching all platform group memberships...**")
+                    all_groups = await get_all_platform_groups(bot)
+                    if not all_groups:
+                        await msg.edit("ℹ️ **No active groups recorded across platform.**")
+                        return
+                    res = f"📊 **Bot Group Membership List (`{len(all_groups)}` groups):**\n\n"
+                    for g_id, g_name in all_groups.items():
+                        res += f"• **{g_name}** (ID: `{g_id}`)\n"
+                    if len(res) > 3900:
+                        res = res[:3900] + "\n\n...[List Truncated]"
+                    await msg.edit(res)
+                    return
+                elif cmd in ["addsudousers", "addsudo"]:
+                    target = text[len(first_word):].strip()
+                    if not target:
+                        await event.reply("💡 **Usage:** `.addsudousers <@username or user_id>`")
+                        return
+                    SUDO_USERS.add(target)
+                    await event.reply(f"👑 **Added Admin/Sudo User:** `{target}`")
+                    return
+                elif cmd in ["removesodousers", "rmsudo", "removesudouser"]:
+                    target = text[len(first_word):].strip()
+                    if not target:
+                        await event.reply("💡 **Usage:** `.removesodousers <@username or user_id>`")
+                        return
+                    SUDO_USERS.discard(target)
+                    await event.reply(f"🛑 **Removed Admin/Sudo User:** `{target}`")
+                    return
+                elif cmd in ["restartall", "refresh"]:
+                    if sender_id != Config.OWNER_ID:
+                        await event.reply("⛔ **Owner privileges required.**")
+                        return
+                    if cmd == "restartall":
+                        msg = await event.reply("🔄 **Restarting all userbot sessions...**")
+                        count = await session_manager.load_all_sessions()
+                        await msg.edit(f"✅ **Restarted `{count}` userbot sessions!**")
+                    else:
+                        await event.reply("✨ **Platform state refreshed successfully!**")
+                    return
+
+            # Group Admin Exemption commands (.gapprove, .gdisapprove, .gunapprove)
+            if cmd in ["gapprove", "gdisapprove", "gunapprove"]:
+                reply = await event.get_reply_message()
+                parts = text[len(first_word):].strip().split()
+                target = parts[0] if parts else (str(reply.sender_id) if reply else None)
+
+                if not target:
+                    await event.reply(f"💡 **Usage:** Reply to a user or type `.{cmd} <@username or user_id>`")
+                    return
+
+                is_allowed = is_owner_admin
+                if not is_allowed:
+                    try:
+                        p = await bot.get_permissions(event.chat_id, sender_id)
+                        if p.is_admin:
+                            is_allowed = True
+                    except Exception:
+                        pass
+
+                if not is_allowed:
+                    await event.reply("⛔ **Group Admin or Bot Admin privileges required!**")
+                    return
+
+                if cmd == "gapprove":
+                    t_key = str(target).lower()
+                    if event.chat_id not in APPROVED_USERS_PER_GROUP:
+                        APPROVED_USERS_PER_GROUP[event.chat_id] = set()
+                    APPROVED_USERS_PER_GROUP[event.chat_id].add(t_key)
+                    try:
+                        with db_session() as session:
+                            existing = session.query(ApprovedGroupUser).filter(
+                                ApprovedGroupUser.group_id == event.chat_id,
+                                ApprovedGroupUser.target == t_key
+                            ).first()
+                            if not existing:
+                                session.add(ApprovedGroupUser(group_id=event.chat_id, target=t_key))
+                            session.commit()
+                    except Exception as e:
+                        LOGS.error(f"Error persisting ApprovedGroupUser: {e}")
+                    try:
+                        target_entity = await resolve_target(bot, target)
+                        await bot.edit_permissions(event.chat_id, target_entity, view_messages=True, send_messages=True)
+                    except Exception:
+                        pass
+                    await event.reply(
+                        f"✅ **User Approved for this Group!**\n\n"
+                        f"👤 **Target:** `{target}`\n"
+                        f"🛡️ *This user is exempted from GBAN auto-ban in this group.*"
+                    )
+                    return
+                else: # gdisapprove / gunapprove
+                    t_key = str(target).lower()
+                    t_norm = t_key[1:] if t_key.startswith("@") else t_key
+                    if event.chat_id in APPROVED_USERS_PER_GROUP:
+                        APPROVED_USERS_PER_GROUP[event.chat_id].discard(t_key)
+                        APPROVED_USERS_PER_GROUP[event.chat_id].discard(t_norm)
+                        APPROVED_USERS_PER_GROUP[event.chat_id].discard(f"@{t_norm}")
+                    try:
+                        with db_session() as session:
+                            session.query(ApprovedGroupUser).filter(
+                                ApprovedGroupUser.group_id == event.chat_id,
+                                (ApprovedGroupUser.target == t_key) | (ApprovedGroupUser.target == t_norm) | (ApprovedGroupUser.target == f"@{t_norm}")
+                            ).delete(synchronize_session=False)
+                            session.commit()
+                    except Exception as e:
+                        LOGS.error(f"Error removing ApprovedGroupUser: {e}")
+                    banned_again = False
+                    is_gbanned = (t_key in GBAN_LIST or t_norm in GBAN_LIST or f"@{t_norm}" in GBAN_LIST)
+                    if is_gbanned:
+                        try:
+                            target_entity = await resolve_target(bot, target)
+                            await bot.edit_permissions(event.chat_id, target_entity, view_messages=False)
+                            banned_again = True
+                        except Exception:
+                            try:
+                                await bot.kick_participant(event.chat_id, target)
+                                banned_again = True
+                            except Exception:
+                                pass
+                    if banned_again:
+                        await event.reply(
+                            f"🛑 **User Disapproved & Banned!**\n\n"
+                            f"👤 **Target:** `{target}`\n"
+                            f"⚠️ *Group exemption removed. Target is globally banned and has been banned again from this group.*"
+                        )
+                    else:
+                        await event.reply(
+                            f"🛑 **User Disapproved for this Group!**\n\n"
+                            f"👤 **Target:** `{target}`\n"
+                            f"⚠️ *Group exemption removed.*"
+                        )
+                    return
+
+            # General Userbot Commands in Group: Check if sender is a logged-in userbot owner
+            has_active_userbot = session_manager.get_active_client(sender_id) is not None
+            if not has_active_userbot:
+                bot_username = "AuroraVexBot"
+                try:
+                    if main_bot_client:
+                        b_me = await main_bot_client.get_me()
+                        if b_me and b_me.username:
+                            bot_username = b_me.username
+                except Exception:
+                    pass
+
+                group_help_text = (
+                    "✨ **Aurora Userbot Group Commands!** ✨\n\n"
+                    "The following commands can be executed in groups by hosted userbots:\n\n"
+                    "📨 **Spam & Raid:** `.spam`, `.tspam`, `.raid`, `.araid`, `.sraid`, `.replyraid`, `.craid`\n"
+                    "🔔 **Tagging & Moderation:** `.tagall`, `.ban`, `.unban`, `.mute`, `.unmute`, `.kick`, `.clear`, `.add`\n"
+                    "✍️ **Utility & Fun:** `.info`, `.ping`, `.sd`, `.stylish`, `.autoreply`, `.clone`, `.joke`\n\n"
+                    "💡 **Want to use these commands?**\n"
+                    "🚀 **Host your own userbot now!**\n"
+                    f"👉 Open PM with @{bot_username} and send `/host` to deploy your userbot in seconds!"
+                )
+                await event.reply(group_help_text)
+                return
 
     @bot.on(events.NewMessage)
     async def handler(event):
@@ -538,10 +1659,14 @@ async def start_aurora_bot():
             await event.reply("❌ Onboarding cancelled. Send /host whenever you want to begin again.")
             return
 
-        # Slash Commands Handling & Onboarding Reset
-        if text.startswith("/"):
-            # Reset login state on new command unless it's /cancel
-            if chat_id in user_login_states and text not in ["/cancel", "/stop"]:
+        # Command Handling for both Slash (/) and Dot (.) prefixes
+        if text.startswith("/") or text.startswith("."):
+            clean_text = text[1:].strip()
+            first_word = text.split()[0].lower()
+            cmd = first_word[1:] if len(first_word) > 1 else ""
+
+            # Reset login state on new command unless it's cancel/stop
+            if chat_id in user_login_states and cmd not in ["cancel", "stop"]:
                 old_sess = user_login_states.pop(chat_id)
                 if old_sess.get("client"):
                     try:
@@ -549,7 +1674,7 @@ async def start_aurora_bot():
                     except Exception:
                         pass
 
-            if text.startswith("/host") or text.startswith("/login"):
+            if cmd in ["host", "login"]:
                 user_client = session_manager.get_active_client(chat_id)
                 has_db_session = session_manager.get_decrypted_session(chat_id) is not None
                 if (user_client and user_client.is_connected()) or has_db_session:
@@ -569,8 +1694,8 @@ async def start_aurora_bot():
                 await event.reply("📱 **Enter Phone Number (+91xxxxxxxxxx):**")
                 return
 
-            # Command: /start
-            if text.startswith("/start"):
+            # Command: /start or .start
+            if cmd == "start":
                 buttons = [
                     [Button.inline("📖 Help", data="cmd_help"), Button.inline("✨ Commands", data="cat_main")],
                     [Button.inline("🚀 Host Userbot", data="cmd_host")]
@@ -578,8 +1703,8 @@ async def start_aurora_bot():
                 await event.reply(WELCOME_TEXT, buttons=buttons)
                 return
 
-            # Command: /help
-            if text.startswith("/help"):
+            # Command: /help or .help
+            if cmd == "help":
                 buttons = [
                     [Button.inline("✨ Explore Commands", data="cat_main")],
                     [Button.inline("🚀 Host Userbot", data="cmd_host")]
@@ -587,18 +1712,18 @@ async def start_aurora_bot():
                 await event.reply(HELP_TEXT, buttons=buttons)
                 return
 
-            # Command: /commands, /cmds, /command
-            if text in ["/commands", "/cmds", "/command"] or text.startswith("/commands") or text.startswith("/cmds"):
+            # Command: /commands, .commands, /cmds, .cmds, /command, .command
+            if cmd in ["commands", "cmds", "command"]:
                 await event.reply(COMMANDS_HEADER, buttons=get_commands_keyboard())
                 return
 
-            # Command: /support
-            if text.startswith("/support"):
+            # Command: /support or .support
+            if cmd == "support":
                 await event.reply(f"💬 **Support:** Contact @{Config.OWNER_USERNAME} (Fast Response)")
                 return
 
-            # Command: /restart
-            if text.startswith("/restart"):
+            # Command: /restart or .restart
+            if cmd == "restart":
                 msg = await event.reply("🔄 **Reviving your hosted userbot session...**")
                 client = await session_manager.start_user_session(chat_id)
                 if client and client.is_connected():
@@ -607,13 +1732,118 @@ async def start_aurora_bot():
                     await msg.edit("🔴 **No active session found.** Send /host to deploy your userbot.")
                 return
 
-            # Command: /supportraid
-            if text.startswith("/supportraid"):
+            # Command: /supportraid or .supportraid
+            if cmd == "supportraid":
                 await event.reply("💥 **Pro Support Raid Command:** Ready for Pro / Premium users.")
                 return
 
-            # Command: /restartall (Owner Only)
-            if text.startswith("/restartall"):
+            # Command: /info or .info
+            if cmd == "info":
+                reply = await event.get_reply_message()
+                query = text[len(text.split()[0]):].strip()
+
+                target = None
+                if reply:
+                    try:
+                        target = await reply.get_sender()
+                    except Exception:
+                        pass
+                    if not target and reply.sender_id:
+                        target = reply.sender_id
+                elif query:
+                    q_str = query.strip()
+                    if q_str.isdigit() or (q_str.startswith("-") and q_str[1:].isdigit()):
+                        target = int(q_str)
+                    else:
+                        target = q_str
+                else:
+                    try:
+                        target = await event.get_sender() or event.sender_id
+                    except Exception:
+                        target = event.sender_id
+
+                from aurora.plugins.utility import get_user_entity_robust
+                target_user = await get_user_entity_robust(bot, target)
+                if not target_user and target:
+                    try:
+                        target_user = await bot.get_entity(target)
+                    except Exception:
+                        pass
+
+                if target_user:
+                    if getattr(target_user, "title", None) and getattr(target_user, "first_name", None) is None:
+                        title = getattr(target_user, "title", "Group/Channel")
+                        chat_id_val = target_user.id
+                        username = f"@{target_user.username}" if getattr(target_user, "username", None) else "None"
+                        members_count = getattr(target_user, "participants_count", "Unknown")
+                        await event.reply(
+                            f"💬 **Chat / Channel Info:**\n\n"
+                            f"📛 **Title:** `{title}`\n"
+                            f"🆔 **ID:** `{chat_id_val}`\n"
+                            f"🏷️ **Username:** {username}\n"
+                            f"👥 **Members:** `{members_count}`"
+                        )
+                        return
+
+                    name = f"{getattr(target_user, 'first_name', '') or ''} {getattr(target_user, 'last_name', '') or ''}".strip() or "Unknown"
+                    username = f"@{target_user.username}" if getattr(target_user, "username", None) else "None"
+                    user_id = getattr(target_user, "id", "Unknown")
+                    is_bot = getattr(target_user, "bot", False)
+                    is_premium = getattr(target_user, "premium", False)
+                    is_verified = getattr(target_user, "verified", False)
+                    is_scam = getattr(target_user, "scam", False)
+
+                    bio = "None"
+                    common_chats = "0"
+                    try:
+                        from telethon.tl.functions.users import GetFullUserRequest
+                        full_user = await bot(GetFullUserRequest(target_user))
+                        full_info = getattr(full_user, "full_user", None)
+                        if full_info:
+                            bio = full_info.about or "None"
+                            common_chats = str(getattr(full_info, "common_chats_count", 0))
+                    except Exception:
+                        pass
+
+                    dc_id = "Unknown"
+                    if getattr(target_user, "photo", None):
+                        dc_id = str(getattr(target_user.photo, "dc_id", "Unknown"))
+
+                    permalink = f"[{name}](tg://user?id={user_id})"
+
+                    info_text = (
+                        f"👤 **User Info:**\n\n"
+                        f"📛 **Name:** {permalink}\n"
+                        f"🆔 **User ID:** `{user_id}`\n"
+                        f"🏷️ **Username:** {username}\n"
+                        f"📝 **Bio:** `{bio}`\n"
+                        f"🤖 **Is Bot:** `{is_bot}`\n"
+                        f"⭐ **Is Premium:** `{is_premium}`\n"
+                        f"🛡️ **Verified:** `{is_verified}` | ⚠️ **Scam:** `{is_scam}`\n"
+                        f"🌐 **Data Center (DC):** `{dc_id}`\n"
+                        f"💬 **Common Chats:** `{common_chats}`"
+                    )
+                    await event.reply(info_text)
+                else:
+                    t_str = str(target or "Unknown")
+                    permalink = f"[User {t_str}](tg://user?id={t_str})" if t_str.lstrip("-").isdigit() else f"`{t_str}`"
+                    info_text = (
+                        f"👤 **User Info:**\n\n"
+                        f"📛 **Name:** {permalink}\n"
+                        f"🆔 **User ID:** `{t_str}`\n"
+                        f"🏷️ **Username:** None\n"
+                        f"📝 **Bio:** None\n"
+                        f"🤖 **Is Bot:** `False`\n"
+                        f"⭐ **Is Premium:** `False`\n"
+                        f"🛡️ **Verified:** `False` | ⚠️ **Scam:** `False`\n"
+                        f"🌐 **Data Center (DC):** `Unknown`\n"
+                        f"💬 **Common Chats:** `0`"
+                    )
+                    await event.reply(info_text)
+                return
+
+            # Command: /restartall or .restartall (Owner Only)
+            if cmd == "restartall":
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
@@ -622,16 +1852,16 @@ async def start_aurora_bot():
                 await msg.edit(f"✅ **Restarted `{count}` userbot sessions!**")
                 return
 
-            # Command: /refresh (Owner Only)
-            if text.startswith("/refresh"):
+            # Command: /refresh or .refresh (Owner Only)
+            if cmd == "refresh":
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
                 await event.reply("✨ **Platform state refreshed successfully!**")
                 return
 
-            # Command: /status
-            if text.startswith("/status"):
+            # Command: /status or .status
+            if cmd == "status":
                 user_client = session_manager.get_active_client(chat_id)
                 if user_client and user_client.is_connected():
                     msg = f"🟢 **Aurora Status:** ACTIVE & HOSTED\n🆔 **User ID:** `{chat_id}`"
@@ -640,8 +1870,8 @@ async def start_aurora_bot():
                 await event.reply(sanitize_text(msg))
                 return
 
-            # Command: /logout
-            if text.startswith("/logout"):
+            # Command: /logout or .logout
+            if cmd == "logout":
                 user_client = session_manager.get_active_client(chat_id)
                 has_db_session = session_manager.get_decrypted_session(chat_id) is not None
 
@@ -652,21 +1882,21 @@ async def start_aurora_bot():
                     await event.reply("ℹ️ **You are not currently logged in.** Send /host to deploy your userbot.")
                 return
 
-            # Command: /listsudousers & /sudolist (Owner Only)
-            if text.startswith("/listsudousers") or text.startswith("/sudolist"):
-                if chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Only platform owner can access this menu!**")
+            # Command: /listsudousers & /sudolist & /adminlist & .listsudousers & .sudolist & .adminlist (Owner Only)
+            if cmd in ["listsudousers", "sudolist", "adminlist"]:
+                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS:
+                    await event.reply("⛔ **Only platform owner/admin can access this menu!**")
                     return
-                s_list = "\n".join([f"• `{u}`" for u in SUDO_USERS]) if SUDO_USERS else "• `@tglegend77` (Owner)"
-                await event.reply(f"👑 **Sudo / Admin Users List:**\n\n{s_list}")
+                res = await get_formatted_admin_list(bot)
+                await event.reply(res)
                 return
 
-            # Command: /addsudousers /addsudo (Owner Only)
-            if text.startswith("/addsudousers") or text.startswith("/addsudo"):
+            # Command: /addsudousers /addsudo .addsudousers .addsudo (Owner Only)
+            if cmd in ["addsudousers", "addsudo"]:
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
-                target = text.replace("/addsudousers", "").replace("/addsudo", "").strip()
+                target = text[len(text.split()[0]):].strip()
                 if not target:
                     await event.reply("💡 **Usage:** `/addsudousers <@username or user_id>`")
                     return
@@ -674,12 +1904,12 @@ async def start_aurora_bot():
                 await event.reply(f"👑 **Added Admin/Sudo User:** `{target}`")
                 return
 
-            # Command: /removesodousers /rmsudo /removesudouser (Owner Only)
-            if text.startswith("/removesodousers") or text.startswith("/rmsudo") or text.startswith("/removesudouser"):
+            # Command: /removesodousers /rmsudo /removesudouser .removesodousers .rmsudo (Owner Only)
+            if cmd in ["removesodousers", "rmsudo", "removesudouser"]:
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
-                target = text.replace("/removesodousers", "").replace("/rmsudo", "").replace("/removesudouser", "").strip()
+                target = text[len(text.split()[0]):].strip()
                 if not target:
                     await event.reply("💡 **Usage:** `/removesodousers <@username or user_id>`")
                     return
@@ -687,8 +1917,8 @@ async def start_aurora_bot():
                 await event.reply(f"🛑 **Removed Admin/Sudo User:** `{target}`")
                 return
 
-            # Command: /listgroups (Admin & Owner)
-            if text.startswith("/listgroups"):
+            # Command: /listgroups or .listgroups (Admin & Owner)
+            if cmd == "listgroups":
                 if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Admin / Owner privileges required.**")
                     return
@@ -710,195 +1940,87 @@ async def start_aurora_bot():
                 await msg.edit(res)
                 return
 
-            # Command: /gban (Admin & Owner)
-            if text.startswith("/gban"):
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
-                    return
-                parts = text.replace("/gban", "").strip().split(maxsplit=1)
-                if not parts or not parts[0]:
-                    await event.reply("💡 **Usage:** `/gban <@username or user_id> [reason]`")
-                    return
-                raw_target = parts[0]
-                reason = parts[1] if len(parts) > 1 else "Globally Banned by Admin"
-
-                msg = await event.reply(f"⚡ **Initiating Global Ban for:** `{raw_target}`...")
-                all_groups = await get_all_platform_groups(bot)
-                target_entity = await resolve_target(bot, raw_target)
-                GBAN_LIST[str(raw_target).lower()] = reason
-
-                banned_count = 0
-                banned_groups = set()
-                bot_me = await bot.get_me()
-
-                # Ban across bot groups where bot has ban rights
-                for g_id in list(all_groups.keys()):
-                    try:
-                        perms = await bot.get_permissions(g_id, bot_me)
-                        if perms.is_admin and getattr(perms, "ban_users", False):
-                            await bot.edit_permissions(g_id, target_entity, view_messages=False)
-                            banned_count += 1
-                            banned_groups.add(g_id)
-                    except Exception as e:
-                        LOGS.debug(f"GBan error in bot group {g_id}: {e}")
-
-                # Also ban across active userbots dialogs for remaining groups
-                for uid in session_manager.get_all_active_users():
-                    u_client = session_manager.get_active_client(uid)
-                    if u_client and u_client.is_connected():
-                        try:
-                            u_me = await u_client.get_me()
-                            for g_id in list(all_groups.keys()):
-                                if g_id not in banned_groups:
-                                    try:
-                                        u_perms = await u_client.get_permissions(g_id, u_me)
-                                        if u_perms.is_admin and getattr(u_perms, "ban_users", False):
-                                            await u_client.edit_permissions(g_id, target_entity, view_messages=False)
-                                            banned_count += 1
-                                            banned_groups.add(g_id)
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-
-                await msg.edit(f"🚫 **Global Ban Executed!**\n\n👤 **Target:** `{raw_target}`\n💬 **Banned in:** `{banned_count}` groups (where bot/userbots have ban rights)\n📝 **Reason:** `{reason}`")
-                return
-
-            # Command: /gunban (Admin & Owner)
-            if text.startswith("/gunban"):
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
-                    return
-                target = text.replace("/gunban", "").strip()
-                if not target:
-                    await event.reply("💡 **Usage:** `/gunban <@username or user_id>`")
-                    return
-                msg = await event.reply(f"⚡ **Initiating Global Unban for:** `{target}`...")
-
-                all_groups = await get_all_platform_groups(bot)
-                target_entity = await resolve_target(bot, target)
-                GBAN_LIST.pop(str(target).lower(), None)
-                GBAN_LIST.pop(str(target), None)
-
-                unbanned_count = 0
-                unbanned_groups = set()
-                bot_me = await bot.get_me()
-
-                for g_id in list(all_groups.keys()):
-                    try:
-                        perms = await bot.get_permissions(g_id, bot_me)
-                        if perms.is_admin and getattr(perms, "ban_users", False):
-                            await bot.edit_permissions(g_id, target_entity, view_messages=True, send_messages=True)
-                            unbanned_count += 1
-                            unbanned_groups.add(g_id)
-                    except Exception as e:
-                        LOGS.debug(f"GUnban error in bot group {g_id}: {e}")
-
-                for uid in session_manager.get_all_active_users():
-                    u_client = session_manager.get_active_client(uid)
-                    if u_client and u_client.is_connected():
-                        try:
-                            u_me = await u_client.get_me()
-                            for g_id in list(all_groups.keys()):
-                                if g_id not in unbanned_groups:
-                                    try:
-                                        u_perms = await u_client.get_permissions(g_id, u_me)
-                                        if u_perms.is_admin and getattr(u_perms, "ban_users", False):
-                                            await u_client.edit_permissions(g_id, target_entity, view_messages=True, send_messages=True)
-                                            unbanned_count += 1
-                                            unbanned_groups.add(g_id)
-                                    except Exception:
-                                        pass
-                        except Exception:
-                            pass
-
-                await msg.edit(f"✅ **Global Unban Executed!**\n\n👤 **Target:** `{target}`\n💬 **Unbanned in:** `{unbanned_count}` groups")
-                return
-
-            # Command: /gbanlist (Admin & Owner)
-            if text.startswith("/gbanlist"):
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
-                    return
-                if not GBAN_LIST:
-                    await event.reply("ℹ️ **No users globally banned.**")
-                    return
-                res = "🚫 **Globally Banned Users List:**\n\n"
-                for u, r in GBAN_LIST.items():
-                    res += f"• `{u}` - *{r}*\n"
-                await event.reply(res)
-                return
-
-            # Command: /gbroadcast (Admin & Owner) - Dual Fallback Broadcast (Bot -> Active Hosted Userbots)
-            if text.startswith("/gbroadcast"):
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
-                    return
-                msg_text = text.replace("/gbroadcast", "").strip()
-                if not msg_text:
-                    await event.reply("💡 **Usage:** `/gbroadcast <message>`")
-                    return
-
-                msg = await event.reply("📢 **Sending Global Broadcast across all platform groups...**")
-
-                all_groups = await get_all_platform_groups(bot)
-                if not all_groups:
-                    await msg.edit("ℹ️ **No active groups recorded across platform to broadcast.**")
-                    return
-
-                sent_bot = 0
-                sent_ub = 0
-                failed = 0
-
-                active_userbots = []
-                for uid in session_manager.get_all_active_users():
-                    u_client = session_manager.get_active_client(uid)
-                    if u_client and u_client.is_connected():
-                        active_userbots.append(u_client)
-
-                for g_id in list(all_groups.keys()):
-                    success = False
-                    # 1. Try sending via Bot Account first
-                    try:
-                        await bot.send_message(g_id, msg_text)
-                        sent_bot += 1
-                        success = True
-                        await asyncio.sleep(0.3)
-                    except Exception as e:
-                        LOGS.debug(f"Bot cannot send to group {g_id}: {e}")
-
-                    # 2. If Bot failed, try active Userbots
-                    if not success and active_userbots:
-                        for u_client in active_userbots:
-                            try:
-                                await u_client.send_message(g_id, msg_text)
-                                sent_ub += 1
-                                success = True
-                                await asyncio.sleep(0.3)
-                                break  # Sent successfully by userbot
-                            except Exception as e:
-                                LOGS.debug(f"Userbot cannot send to group {g_id}: {e}")
-
-                    if not success:
-                        failed += 1
-
-                total_sent = sent_bot + sent_ub
-                total_groups = len(all_groups)
-                await msg.edit(
-                    f"📢 **Global Broadcast Complete!**\n\n"
-                    f"🤖 **Sent by Bot Account in:** `{sent_bot}` groups\n"
-                    f"⚡ **Sent by Hosted Userbots in:** `{sent_ub}` groups\n"
-                    f"❌ **Failed in:** `{failed}` groups\n"
-                    f"📊 **Total Groups Reached:** `{total_sent}` / `{total_groups}` groups"
-                )
-                return
-
-            # Command: /block (Owner Only) - Works by username or user_id
-            if text.startswith("/block"):
+            # Command: /clearbotgroups (Owner Only)
+            if cmd == "clearbotgroups":
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
-                target = text.replace("/block", "").strip()
+                BOT_GROUPS.clear()
+                try:
+                    with db_session() as session:
+                        session.query(BotGroup).delete()
+                        session.commit()
+                except Exception:
+                    pass
+                await event.reply("✅ **Cleared all bot groups cache and database records!**")
+                return
+
+            # Command: /gban or .gban (Admin & Owner)
+            if cmd == "gban":
+                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID and str(chat_id) not in SUDO_USERS:
+                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                    return
+                input_str = text[len(first_word):].strip()
+                raw_target, target_entity, reason = await resolve_gban_event_target(bot, event, input_str)
+                if not raw_target:
+                    await event.reply("💡 **Usage:** `/gban <@username or user_id> [reason]` or reply to a user")
+                    return
+
+                msg = await event.reply(f"⚡ **Initiating Global Ban for:** `{raw_target}`...")
+                res = await execute_global_ban(raw_target, target_entity=target_entity, reason=reason)
+                await msg.edit(res)
+                return
+
+            # Command: /gunban or .gunban (Admin & Owner)
+            if cmd == "gunban":
+                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID and str(chat_id) not in SUDO_USERS:
+                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                    return
+                input_str = text[len(first_word):].strip()
+                target, target_entity = await resolve_gunban_event_target(bot, event, input_str)
+                if not target:
+                    await event.reply("💡 **Usage:** `/gunban <@username or user_id>` or reply to a user")
+                    return
+                msg = await event.reply(f"⚡ **Initiating Global Unban for:** `{target}`...")
+                res = await execute_global_unban(target, target_entity=target_entity)
+                await msg.edit(res)
+                return
+
+            # Command: /listgban & /gbanlist & .listgban & .gbanlist
+            if cmd in ["listgban", "gbanlist"]:
+                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
+                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                    return
+
+                res = await get_formatted_gban_list(bot)
+                await event.reply(res)
+                return
+
+            # Command: /gbroadcast or .gbroadcast or /gcast or .gcast (Admin & Owner)
+            if cmd in ["gbroadcast", "gcast"]:
+                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
+                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                    return
+                reply = await event.get_reply_message()
+                msg_text = text[len(text.split()[0]):].strip()
+                if not msg_text and reply:
+                    msg_text = reply.text or reply.message
+
+                if not msg_text:
+                    await event.reply("💡 **Usage:** `/gbroadcast <message>` or reply to a message")
+                    return
+
+                msg = await event.reply("📢 **Sending Global Broadcast across Aurora platform...**")
+                res = await execute_global_broadcast(msg_text, reply_msg=reply, event=event)
+                await msg.edit(res)
+                return
+
+            # Command: /block or .block (Owner Only)
+            if cmd == "block":
+                if chat_id != Config.OWNER_ID:
+                    await event.reply("⛔ **Owner privileges required.**")
+                    return
+                target = text[len(text.split()[0]):].strip()
                 if not target:
                     await event.reply("💡 **Usage:** `/block <@username or user_id>`")
                     return
@@ -934,12 +2056,12 @@ async def start_aurora_bot():
                 await event.reply(f"🚫 **Blocked User:** {u_str}")
                 return
 
-            # Command: /unblock (Owner Only)
-            if text.startswith("/unblock"):
+            # Command: /unblock or .unblock (Owner Only)
+            if cmd == "unblock":
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
-                target = text.replace("/unblock", "").strip()
+                target = text[len(text.split()[0]):].strip()
                 if not target:
                     await event.reply("💡 **Usage:** `/unblock <@username or user_id>`")
                     return
@@ -966,8 +2088,8 @@ async def start_aurora_bot():
                     await event.reply(f"ℹ️ **User `{target}` is not in blocked list.**")
                 return
 
-            # Command: /listblock & /blockeduser (Owner Only) - Shows Username & ID
-            if text.startswith("/listblock") or text.startswith("/blockeduser"):
+            # Command: /listblock or /blockeduser or .listblock or .blockeduser (Owner Only)
+            if cmd in ["listblock", "blockeduser"]:
                 if chat_id != Config.OWNER_ID:
                     await event.reply("⛔ **Owner privileges required.**")
                     return
@@ -986,8 +2108,8 @@ async def start_aurora_bot():
                 await event.reply(res)
                 return
 
-            # Command: /stats
-            if text.startswith("/stats"):
+            # Command: /stats or .stats
+            if cmd == "stats":
                 total_active = len(session_manager.get_all_active_users())
                 cpu_usage = psutil.cpu_percent()
                 ram_usage = psutil.virtual_memory().percent

@@ -25,7 +25,7 @@ def register_autoreply_handlers(client):
     Registers Tag AutoReply and ClearAll event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.autoreply(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]autoreply(?:\s+([\s\S]+))?"))
     async def tag_autoreply_handler(event):
         msg_text = event.pattern_match.group(1)
         if not msg_text:
@@ -36,7 +36,7 @@ def register_autoreply_handlers(client):
         TAG_AUTOREPLIES[me.id] = msg_text.strip()
         await event.edit(f"🤖 **Tag AutoReply Set!**\n\nWhen tagged/mentioned, will reply:\n💬 `{msg_text.strip()}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.dautoreply$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]dautoreply$"))
     async def dautoreply_handler(event):
         me = await client.get_me()
         TAG_AUTOREPLIES.pop(me.id, None)
@@ -58,7 +58,7 @@ def register_autoreply_handlers(client):
             except Exception as e:
                 LOGS.error(f"Tag mention reply error: {e}")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.clearall(?:\s+(confirm))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]clearall(?:\s+(confirm))?"))
     async def clearall_handler(event):
         confirm = event.pattern_match.group(1)
         if confirm == "confirm":

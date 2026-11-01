@@ -24,7 +24,7 @@ def register_spam_handlers(client):
     Registers spam event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.spam\s+(\d+)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]spam\s+(\d+)(?:\s+([\s\S]+))?"))
     async def spam_handler(event):
         count = int(event.pattern_match.group(1))
         text = event.pattern_match.group(2) or "Hello!"
@@ -41,13 +41,13 @@ def register_spam_handlers(client):
 
         ACTIVE_SPAMS.discard(chat)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.stopspam(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]stopspam(?:\s+([\s\S]+))?"))
     async def stopspam_handler(event):
         ACTIVE_SPAMS.discard(event.chat_id)
         ACTIVE_SPAMS.clear()
         await event.edit("🛑 **Spam stopped successfully!**")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.tspam\s+(\d+)\s+(\d+)\s+([\s\S]+)"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]tspam\s+(\d+)\s+(\d+)\s+([\s\S]+)"))
     async def tspam_handler(event):
         delay = int(event.pattern_match.group(1))
         count = int(event.pattern_match.group(2))
@@ -65,7 +65,7 @@ def register_spam_handlers(client):
 
         ACTIVE_SPAMS.discard(chat)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.cspam\s+([\s\S]+)"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]cspam\s+([\s\S]+)"))
     async def cspam_handler(event):
         text = event.pattern_match.group(1)
 
@@ -75,7 +75,7 @@ def register_spam_handlers(client):
                 await event.respond(char)
                 await asyncio.sleep(0.2)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.delayspam\s+(\d+)\s+(\d+)\s+([\s\S]+)"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]delayspam\s+(\d+)\s+(\d+)\s+([\s\S]+)"))
     async def delayspam_handler(event):
         delay = int(event.pattern_match.group(1))
         count = int(event.pattern_match.group(2))
@@ -86,7 +86,7 @@ def register_spam_handlers(client):
             await event.respond(text)
             await asyncio.sleep(delay)
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.bigspam\s+(\d+)\s+([\s\S]+)"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./]bigspam\s+(\d+)\s+([\s\S]+)"))
     async def bigspam_handler(event):
         count = int(event.pattern_match.group(1))
         text = event.pattern_match.group(2)

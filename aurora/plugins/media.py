@@ -22,7 +22,7 @@ def register_media_handlers(client):
     Registers stealth media saver event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(sd|save)$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](sd|save)$"))
     async def save_handler(event):
         reply = await event.get_reply_message()
         if not reply:

@@ -32,7 +32,7 @@ def register_welcome_handlers(client):
     Registers DM and Group welcome event handlers on client.
     """
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(setwlcm|setwelcome)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](setwlcm|setwelcome)(?:\s+([\s\S]+))?"))
     async def setwelcome_handler(event):
         msg = event.pattern_match.group(2)
         reply = await event.get_reply_message()
@@ -53,7 +53,7 @@ def register_welcome_handlers(client):
 
         await event.edit(f"🎉 **Custom Welcome Message Set For First DMs & Group Joins!**\n\n💬 `{msg}`")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^\.(stopwlcm|clearwelcome|stopwelcome|wlcmmssg)$"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](stopwlcm|clearwelcome|stopwelcome|wlcmmssg)$"))
     async def clearwelcome_handler(event):
         me = await client.get_me()
         GLOBAL_WELCOME.pop(me.id, None)
