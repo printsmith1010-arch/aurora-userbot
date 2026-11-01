@@ -17,6 +17,7 @@ from telethon.errors import (
     PhoneNumberInvalidError,
     PhoneCodeExpiredError,
     PasswordHashInvalidError,
+    FloodWaitError,
 )
 from telethon.sessions import MemorySession, StringSession
 
@@ -1847,6 +1848,60 @@ async def start_aurora_bot():
                 await event.reply("📱 **Enter Phone Number (+91xxxxxxxxxx for India or +299xxxxxx for Greenland):**")
                 return
 
+            # Command: /hostsession or .hostsession (Direct StringSession Login)
+            if cmd == "hostsession":
+                parts = text.split(maxsplit=1)
+                if len(parts) < 2 or not parts[1].strip():
+                    await event.reply(
+                        "ℹ️ **Usage:** `/hostsession <string_session>`\n\n"
+                        "💡 *Generate a string session on your PC with `python stringsetup.py` and send `/hostsession <string>` to host instantly without needing OTP!*"
+                    )
+                    return
+
+                session_str_input = parts[1].strip()
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+
+                msg = await event.reply("⏳ **Validating string session...**")
+                test_client = TelegramClient(StringSession(session_str_input), Config.API_ID, Config.API_HASH)
+                try:
+                    await test_client.connect()
+                    if not await test_client.is_user_authorized():
+                        await test_client.disconnect()
+                        await msg.edit("❌ **Invalid or expired string session.** Please generate a fresh session.")
+                        return
+
+                    me = await test_client.get_me()
+                    await test_client.disconnect()
+
+                    role = "owner" if me.id == Config.OWNER_ID else "user"
+                    await session_manager.save_user_session(
+                        telegram_id=me.id,
+                        session_str=session_str_input,
+                        phone=getattr(me, "phone", None),
+                        username=getattr(me, "username", None),
+                        first_name=me.first_name,
+                        role=role,
+                    )
+                    await session_manager.start_user_session(me.id)
+
+                    user_str = f"@{me.username}" if getattr(me, "username", None) else me.first_name
+                    await msg.edit(
+                        f"🎉 **Aurora Userbot Successfully Hosted!**\n\n"
+                        f"👤 **Account:** {user_str}\n"
+                        f"🆔 **Telegram ID:** `{me.id}`\n\n"
+                        f"🔒 **Session Status:** AES-256 Encrypted in Aurora DB."
+                    )
+                except Exception as e:
+                    try:
+                        await test_client.disconnect()
+                    except Exception:
+                        pass
+                    await msg.edit(sanitize_text(f"❌ **Error activating session:** `{e}`"))
+                return
+
             # Command: /start or .start
             if cmd == "start":
                 buttons = [
@@ -2448,11 +2503,6 @@ async def start_aurora_bot():
                     StringSession(),
                     Config.API_ID,
                     Config.API_HASH,
-                    device_model="Samsung Galaxy S22",
-                    system_version="Android 14",
-                    app_version="10.8.2",
-                    lang_code="en",
-                    system_lang_code="en",
                 )
 
                 try:
@@ -2466,6 +2516,10 @@ async def start_aurora_bot():
                         "📲 **IMPORTANT:** Check your **official Telegram app** (Service Notifications chat) for your 5-digit login code!\n"
                         "⚡ *OTP expires in 2 minutes.*"
                     )
+                except FloodWaitError as e:
+                    await client.disconnect()
+                    user_login_states.pop(chat_id, None)
+                    await msg.edit(f"⏳ **Telegram Rate Limit (FloodWait):** Telegram requires waiting `{e.seconds}` seconds before requesting another code.\n\n💡 *Tip: You can also generate a session string on your PC with `python stringsetup.py` and send `/hostsession <string>` to host instantly without waiting.*")
                 except PhoneNumberInvalidError:
                     await client.disconnect()
                     user_login_states.pop(chat_id, None)

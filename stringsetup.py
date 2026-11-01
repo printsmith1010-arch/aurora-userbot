@@ -7,15 +7,35 @@
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 
-print(
-    """Please go-to my.telegram.org
-Login using your Telegram account
-Click on API Development Tools
-Create a new application, by entering the required details"""
-)
-APP_ID = int(input("Enter APP ID here: "))
-API_HASH = input("Enter API HASH here: ")
+import os
+import sys
+from telethon.sessions import StringSession
+from telethon.sync import TelegramClient
 
+DEFAULT_APP_ID = 25307036
+DEFAULT_API_HASH = "11285731405a814dd4b3af1c61bdd482"
+
+print("\n=======================================================")
+print("      Aurora Telethon StringSession Generator          ")
+print("=======================================================")
+app_id_input = input(f"Enter APP ID [press Enter for default {DEFAULT_APP_ID}]: ").strip()
+APP_ID = int(app_id_input) if app_id_input else DEFAULT_APP_ID
+
+api_hash_input = input(f"Enter API HASH [press Enter for default]: ").strip()
+API_HASH = api_hash_input if api_hash_input else DEFAULT_API_HASH
+
+print("\n[+] Connecting to Telegram...")
 with TelegramClient(StringSession(), APP_ID, API_HASH) as client:
-    print(client.session.save())
-    client.sendmessage("me", client.session.save())
+    session_string = client.session.save()
+    print("\n=======================================================")
+    print("YOUR STRING SESSION (Keep this secret!):")
+    print("=======================================================")
+    print(session_string)
+    print("=======================================================\n")
+    try:
+        client.send_message("me", f"**Your Aurora String Session:**\n`{session_string}`")
+        print("[+] Session string has also been sent to your Telegram 'Saved Messages'!")
+    except Exception:
+        pass
+    print("\n👉 To host on your bot, open PM with your bot and send:")
+    print(f"/hostsession {session_string}\n")

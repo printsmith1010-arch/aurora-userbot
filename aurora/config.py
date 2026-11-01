@@ -18,10 +18,10 @@ load_dotenv(dotenv_path=env_path)
 class Config:
     # Telegram MTProto Application Credentials (Global Platform Credentials)
     API_ID = int(os.environ.get("TELEGRAM_API_ID", "25307036"))
-    API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
+    API_HASH = os.environ.get("TELEGRAM_API_HASH", "11285731405a814dd4b3af1c61bdd482")
 
     # Optional Hoster Bot Token (Optional for userbot, used for aux hoster bot)
-    TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
+    TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8679611350:AAHA41eGl2TRPzefxf1jYzLFPyrhN_m3JqY")
 
     # Owner Credentials
     OWNER_ID = int(os.environ.get("OWNER_ID", "5342258541"))
@@ -31,7 +31,7 @@ class Config:
     DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///aurora.db")
 
     # AES-256 Fernet Encryption Key for Session Storage at Rest
-    ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
+    ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "gK7Z3tL9v_xR8wB2mN5pQ1yD4sV6uF0aJ3kL9mP2nR8=")
 
     # Userbot Command Handler Prefix
     COMMAND_HANDLER = os.environ.get("COMMAND_HANDLER", ".")
