@@ -2465,10 +2465,45 @@ async def start_aurora_bot():
                     state["client"] = client
                     state["phone_code_hash"] = getattr(code_req, "phone_code_hash", None)
                     state["step"] = "WAITING_OTP"
+
+                    from telethon.tl.types.auth import (
+                        SentCodeTypeApp,
+                        SentCodeTypeSms,
+                        SentCodeTypeCall,
+                        SentCodeTypeFlashCall,
+                    )
+
+                    req_type = getattr(code_req, "type", None)
+                    if isinstance(req_type, SentCodeTypeApp):
+                        delivery_method = (
+                            "📲 **Sent to Telegram App!**\n"
+                            "Open your official Telegram app → look inside the chat named **\"Telegram\"** (Service Notifications) for the 5-digit code."
+                        )
+                    elif isinstance(req_type, SentCodeTypeSms):
+                        delivery_method = (
+                            "📩 **Sent via SMS!**\n"
+                            "Telegram sent the OTP to your phone's SMS messages inbox."
+                        )
+                    elif isinstance(req_type, (SentCodeTypeCall, SentCodeTypeFlashCall)):
+                        delivery_method = (
+                            "📞 **Sent via Phone Call / Missed Call!**\n"
+                            "Telegram is calling your phone number with the verification code."
+                        )
+                    else:
+                        delivery_method = (
+                            "📲 Check your **official Telegram app** (Service Notifications) or **SMS** for the code."
+                        )
+
+                    otp_buttons = [
+                        [Button.inline("📩 Resend OTP via SMS", data="resend_otp_sms")],
+                        [Button.inline("❌ Cancel Login", data="cancel_login")]
+                    ]
+
                     await msg.edit(
-                        "🔑 **Enter OTP (e.g., 1 2 3 4 5):**\n\n"
-                        "📲 **IMPORTANT:** Check your **official Telegram app** (Service Notifications chat) for your 5-digit login code!\n"
-                        "⚡ *OTP expires in 2 minutes.*"
+                        f"🔑 **Enter Login Code (e.g., 1 2 3 4 5):**\n\n"
+                        f"{delivery_method}\n\n"
+                        f"⚠️ *If you haven't received it in the Telegram chat, tap **Resend via SMS** below.*",
+                        buttons=otp_buttons
                     )
                 except PhoneNumberInvalidError:
                     await client.disconnect()
@@ -2670,6 +2705,45 @@ async def start_aurora_bot():
                 await event.edit(prompt_text)
             except Exception:
                 await event.respond(prompt_text)
+            return
+
+        if data == "resend_otp_sms":
+            state = user_login_states.get(event.chat_id)
+            if not state or not state.get("client") or not state.get("phone") or not state.get("phone_code_hash"):
+                try:
+                    await event.answer("⚠️ Session expired. Please start over with /host.", alert=True)
+                except Exception:
+                    pass
+                return
+
+            client = state["client"]
+            phone = state["phone"]
+            phone_code_hash = state["phone_code_hash"]
+
+            try:
+                await event.answer("📩 Requesting OTP via SMS...", alert=False)
+                new_req = await client.send_code_request(phone, force_sms=True)
+                state["phone_code_hash"] = getattr(new_req, "phone_code_hash", phone_code_hash)
+                await event.respond("📩 **Telegram has requested OTP delivery via SMS!**\n\nCheck your phone's SMS messages inbox now.")
+            except Exception as e:
+                try:
+                    await event.respond(f"ℹ️ Telegram SMS notice: `{e}`\n\n*If Telegram recently sent the code to your official Telegram app, please check the 'Telegram' chat in your Telegram app.*")
+                except Exception:
+                    pass
+            return
+
+        if data == "cancel_login":
+            if event.chat_id in user_login_states:
+                old_sess = user_login_states.pop(event.chat_id)
+                if old_sess.get("client"):
+                    try:
+                        await old_sess["client"].disconnect()
+                    except Exception:
+                        pass
+            try:
+                await event.edit("❌ **Hosting cancelled.** Send `/host` whenever you want to begin again.")
+            except Exception:
+                await event.respond("❌ **Hosting cancelled.** Send `/host` whenever you want to begin again.")
             return
 
         if data == "cat_owner":
