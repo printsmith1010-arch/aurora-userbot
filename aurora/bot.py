@@ -2378,6 +2378,9 @@ async def start_aurora_bot():
                 await event.reply(stats_msg)
                 return
 
+            # Any other command should return here so it doesn't fall into the onboarding phone handler
+            return
+
         # Userbot Dot Command Handler (.setwelcome, .broadcast, .ping, etc.)
         if text.startswith("."):
             user_client = session_manager.get_active_client(chat_id)
