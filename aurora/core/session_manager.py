@@ -138,11 +138,11 @@ class UserSessionManager:
             try:
                 client = TelegramClient(
                     StringSession(session_str),
-                    Config.API_ID,
-                    Config.API_HASH,
-                    device_model="Samsung Galaxy S22",
-                    system_version="Android 14",
-                    app_version="10.8.2",
+                    2496,
+                    "8c0480c794b70ba12f3447344769fc8b",
+                    device_model="Telegram Web",
+                    system_version="Web",
+                    app_version="1.0.0",
                     lang_code="en",
                     system_lang_code="en",
                     auto_reconnect=True,
