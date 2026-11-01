@@ -1835,12 +1835,16 @@ async def start_aurora_bot():
                     return
 
                 user_login_states[chat_id] = {
-                    "step": "WAITING_PHONE",
+                    "step": "WAITING_COUNTRY",
                     "phone": None,
                     "client": None,
                     "phone_code_hash": None,
                 }
-                await event.reply("📱 **Enter Phone Number (+91xxxxxxxxxx):**")
+                country_buttons = [
+                    [Button.inline("🇮🇳 India (+91)", data="country_in"), Button.inline("🇬🇱 Greenland (+299)", data="country_gl")],
+                    [Button.inline("🌐 Other Country", data="country_other")]
+                ]
+                await event.reply("🌍 **Choose your country for Phone Login:**", buttons=country_buttons)
                 return
 
             # Command: /start or .start
@@ -2428,10 +2432,10 @@ async def start_aurora_bot():
             state = user_login_states[chat_id]
             step = state.get("step")
 
-            if step == "WAITING_PHONE":
+            if step in ["WAITING_COUNTRY", "WAITING_PHONE"]:
                 phone = text.replace(" ", "").replace("-", "")
                 if not (phone.startswith("+") and phone[1:].isdigit()):
-                    await event.reply("❌ **Invalid phone format.** Enter e.g. `+91xxxxxxxxxx`.")
+                    await event.reply("❌ **Invalid phone format.** Please include `+` with country code (e.g. `+91xxxxxxxxxx` or `+299xxxxxx`).")
                     return
 
                 state["phone"] = phone
@@ -2621,13 +2625,17 @@ async def start_aurora_bot():
                 return
 
             user_login_states[event.chat_id] = {
-                "step": "WAITING_PHONE",
+                "step": "WAITING_COUNTRY",
                 "phone": None,
                 "client": None,
                 "phone_code_hash": None,
             }
+            country_buttons = [
+                [Button.inline("🇮🇳 India (+91)", data="country_in"), Button.inline("🇬🇱 Greenland (+299)", data="country_gl")],
+                [Button.inline("🌐 Other Country", data="country_other")]
+            ]
             try:
-                await event.respond("📱 **Enter Phone Number (+91xxxxxxxxxx):**")
+                await event.respond("🌍 **Choose your country for Phone Login:**", buttons=country_buttons)
             except Exception:
                 pass
             return
@@ -2637,6 +2645,24 @@ async def start_aurora_bot():
                 await event.edit(COMMANDS_HEADER, buttons=get_commands_keyboard())
             except Exception:
                 pass
+            return
+
+        if data in ["country_in", "country_gl", "country_other"]:
+            state = user_login_states.get(event.chat_id, {})
+            state["step"] = "WAITING_PHONE"
+            user_login_states[event.chat_id] = state
+
+            if data == "country_in":
+                prompt_text = "🇮🇳 **India Selected (+91)**\n\n📱 **Enter your Indian Phone Number:**\nExample: `+919876543210`"
+            elif data == "country_gl":
+                prompt_text = "🇬🇱 **Greenland Selected (+299)**\n\n📱 **Enter your Greenland Phone Number:**\nExample: `+299xxxxxx`"
+            else:
+                prompt_text = "🌐 **Enter your International Phone Number with country code:**\nExample: `+1234567890`"
+
+            try:
+                await event.edit(prompt_text)
+            except Exception:
+                await event.respond(prompt_text)
             return
 
         if data == "cat_owner":
