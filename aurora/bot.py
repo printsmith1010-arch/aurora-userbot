@@ -2461,7 +2461,6 @@ async def start_aurora_bot():
 
                 try:
                     await asyncio.wait_for(client.connect(), timeout=15)
-                    # First request - Telegram decides delivery (usually App if logged in elsewhere)
                     code_req = await asyncio.wait_for(client.send_code_request(phone), timeout=25)
                     state["client"] = client
                     state["phone_code_hash"] = getattr(code_req, "phone_code_hash", None)
@@ -2475,50 +2474,32 @@ async def start_aurora_bot():
                     )
 
                     req_type = getattr(code_req, "type", None)
-
-                    # If OTP went to Telegram app, auto-resend via SMS so user gets it on phone
                     if isinstance(req_type, SentCodeTypeApp):
-                        try:
-                            sms_req = await asyncio.wait_for(
-                                client.send_code_request(phone, force_sms=True), timeout=25
-                            )
-                            state["phone_code_hash"] = getattr(sms_req, "phone_code_hash", state["phone_code_hash"])
-                            delivery_method = (
-                                "📩 **OTP sent via SMS to your phone!**\n"
-                                "Check your SMS inbox for the 5-digit Telegram code.\n\n"
-                                "*(Also check Telegram app → Service Notifications if SMS doesn't arrive)*"
-                            )
-                        except Exception:
-                            # Fallback: tell user to check app
-                            delivery_method = (
-                                "📲 **Sent to Telegram App (Service Notifications)**\n"
-                                "Open Telegram → find chat named **\"Telegram\"** → copy the 5-digit code.\n\n"
-                                "*(Tap Resend via SMS below if you want it on SMS instead)*"
-                            )
+                        delivery_method = (
+                            "📲 **Telegram sent the code to your Telegram App!**\n\n"
+                            "👉 Open your Telegram app and look for the chat named **\"Telegram\"** (Service Notifications) to view your 5-digit code."
+                        )
                     elif isinstance(req_type, SentCodeTypeSms):
                         delivery_method = (
-                            "📩 **Sent via SMS!**\n"
-                            "Check your phone's SMS inbox for the 5-digit code."
+                            "📩 **Telegram sent the code via SMS!**\n\n"
+                            "👉 Check your phone's SMS inbox for the 5-digit code."
                         )
                     elif isinstance(req_type, (SentCodeTypeCall, SentCodeTypeFlashCall)):
                         delivery_method = (
-                            "📞 **Sent via Phone Call!**\n"
-                            "Telegram is calling your number with the verification code."
+                            "📞 **Telegram is calling your phone number with the code.**"
                         )
                     else:
                         delivery_method = (
-                            "📩 **OTP sent!** Check your SMS or Telegram app (Service Notifications)."
+                            "📲 **Check your Telegram App (Service Notifications) or SMS for the code.**"
                         )
 
                     otp_buttons = [
-                        [Button.inline("📩 Resend OTP via SMS", data="resend_otp_sms")],
                         [Button.inline("❌ Cancel Login", data="cancel_login")]
                     ]
 
                     await msg.edit(
-                        f"🔑 **Enter Login Code (e.g., 12345 or 1 2 3 4 5):**\n\n"
-                        f"{delivery_method}\n\n"
-                        f"⚠️ *Didn't receive it? Tap **Resend via SMS** below.*",
+                        f"🔑 **Enter Login Code (e.g. 1 2 3 4 5 or 12345):**\n\n"
+                        f"{delivery_method}",
                         buttons=otp_buttons
                     )
                 except PhoneNumberInvalidError:
