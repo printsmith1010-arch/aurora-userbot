@@ -138,13 +138,8 @@ class UserSessionManager:
             try:
                 client = TelegramClient(
                     StringSession(session_str),
-                    2496,
-                    "8c0480c794b70ba12f3447344769fc8b",
-                    device_model="Telegram Web",
-                    system_version="Web",
-                    app_version="1.0.0",
-                    lang_code="en",
-                    system_lang_code="en",
+                    Config.API_ID,
+                    Config.API_HASH,
                     auto_reconnect=True,
                     connection_retries=None,
                     retry_delay=5,

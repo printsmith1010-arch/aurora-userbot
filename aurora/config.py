@@ -17,8 +17,9 @@ load_dotenv(dotenv_path=env_path)
 
 class Config:
     # Telegram MTProto Application Credentials (Global Platform Credentials)
-    API_ID = int(os.environ.get("TELEGRAM_API_ID", "25307036"))
-    API_HASH = os.environ.get("TELEGRAM_API_HASH", "11285731405a814dd4b3af1c61bdd482")
+    # Automatically cleans any accidental whitespace, quotes, or linebreaks
+    API_ID = int(str(os.environ.get("TELEGRAM_API_ID", "25307036")).strip().replace(" ", ""))
+    API_HASH = str(os.environ.get("TELEGRAM_API_HASH", "11285731405a814dd4b3af1c61bdd482")).strip().replace(" ", "").replace('"', '').replace("'", "")
 
     # Optional Hoster Bot Token (Optional for userbot, used for aux hoster bot)
     TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "8679611350:AAHA41eGl2TRPzefxf1jYzLFPyrhN_m3JqY")
