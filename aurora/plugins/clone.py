@@ -231,7 +231,7 @@ def register_clone_handlers(client):
                 uploaded = await upload_photos_in_order(client, target_photos)
                 cleanup_files(target_photos)
 
-            # Step 5: Update name and bio
+            # Step 5: Update name and bio (never tamper with your @username)
             await msg.edit("⏳ **[4/4] Updating name & bio...**")
             await client(UpdateProfileRequest(
                 first_name=target_first,
@@ -239,23 +239,13 @@ def register_clone_handlers(client):
                 about=target_bio[:70] if target_bio else ""
             ))
 
-            new_uname_str = ""
-            if target_uname:
-                for candidate in [f"{target_uname}1", f"{target_uname}_1", f"{target_uname}11"]:
-                    try:
-                        await client(UpdateUsernameRequest(username=candidate))
-                        new_uname_str = f"\n🔗 **Username:** @{candidate}"
-                        break
-                    except Exception:
-                        pass
-
             target_name = f"{target_first} {target_last}".strip()
             bio_disp = f"\n📝 **Bio:** `{target_bio}`" if target_bio else "\n📝 **Bio:** *(No Bio)*"
             dp_disp = f"\n📸 **DP Cloned:** `{uploaded}` photo(s)" if uploaded > 0 else "\n📸 **DP:** *(Target has no photo or private)*"
 
             await msg.edit(
-                f"👤 **Cloned:** `{target_name}`{new_uname_str}{bio_disp}{dp_disp}\n"
-                f"💾 **Original DP backed up** (use `.revert` to restore)"
+                f"👤 **Cloned:** `{target_name}`{bio_disp}{dp_disp}\n"
+                f"💾 **Original DP backed up** (use `.revert` or `.dclone` to restore)"
             )
 
         except Exception as e:
@@ -287,18 +277,23 @@ def register_clone_handlers(client):
                 restored = await upload_photos_in_order(client, existing)
                 cleanup_files(existing)
 
-            # Step 3: Restore name, bio, and username
-            await msg.edit("⏳ **[3/3] Restoring name, bio & username...**")
+            # Step 3: Restore name and bio
+            await msg.edit("⏳ **[3/3] Restoring name & bio...**")
             await client(UpdateProfileRequest(
                 first_name=orig.get("first_name", ""),
                 last_name=orig.get("last_name", ""),
                 about=orig.get("bio", "")
             ))
-            if orig.get("username"):
+
+            # If username was modified, safely restore it
+            orig_uname = orig.get("username", "")
+            if orig_uname:
                 try:
-                    await client(UpdateUsernameRequest(username=orig["username"]))
-                except Exception:
-                    pass
+                    curr_me = await client.get_me()
+                    if curr_me.username != orig_uname:
+                        await client(UpdateUsernameRequest(username=orig_uname))
+                except Exception as e:
+                    LOGS.warning(f"Could not restore username @{orig_uname}: {e}")
 
             delete_backup(me.id)
 
