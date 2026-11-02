@@ -8,7 +8,7 @@ import os
 import json
 import logging
 from telethon import events
-from telethon.tl.functions.account import UpdateProfileRequest, UpdateUsernameRequest
+from telethon.tl.functions.account import UpdateProfileRequest, UpdateUsernameRequest, CheckUsernameRequest as telethon_check_username
 from telethon.tl.functions.photos import UploadProfilePhotoRequest, DeletePhotosRequest
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.types import InputPhoto
@@ -231,21 +231,46 @@ def register_clone_handlers(client):
                 uploaded = await upload_photos_in_order(client, target_photos)
                 cleanup_files(target_photos)
 
-            # Step 5: Update name and bio (never tamper with your @username)
-            await msg.edit("⏳ **[4/4] Updating name & bio...**")
+            # Step 5: Update name and bio
+            await msg.edit("⏳ **[4/4] Updating name, bio & username...**")
             await client(UpdateProfileRequest(
                 first_name=target_first,
                 last_name=target_last,
                 about=target_bio[:70] if target_bio else ""
             ))
 
+            # Step 6: Clone username by appending '1' or variants if available
+            new_uname_str = ""
+            if target_uname:
+                candidates = [
+                    f"{target_uname}1",
+                    f"{target_uname}_1",
+                    f"{target_uname}11",
+                    f"{target_uname}_",
+                    f"{target_uname}01",
+                ]
+                for cand in candidates:
+                    # Telegram username rules: min 5 chars, max 32 chars, letters, digits, underscores
+                    if len(cand) < 5 or len(cand) > 32:
+                        continue
+                    try:
+                        # Check availability first to avoid unnecessary failures
+                        is_avail = await client(telethon_check_username(username=cand))
+                        if is_avail:
+                            await client(UpdateUsernameRequest(username=cand))
+                            new_uname_str = f"\n🔗 **Username Cloned:** @{cand}"
+                            LOGS.info(f"Cloned username set to @{cand}")
+                            break
+                    except Exception as err:
+                        LOGS.debug(f"Candidate @{cand} failed: {err}")
+
             target_name = f"{target_first} {target_last}".strip()
             bio_disp = f"\n📝 **Bio:** `{target_bio}`" if target_bio else "\n📝 **Bio:** *(No Bio)*"
             dp_disp = f"\n📸 **DP Cloned:** `{uploaded}` photo(s)" if uploaded > 0 else "\n📸 **DP:** *(Target has no photo or private)*"
 
             await msg.edit(
-                f"👤 **Cloned:** `{target_name}`{bio_disp}{dp_disp}\n"
-                f"💾 **Original DP backed up** (use `.revert` or `.dclone` to restore)"
+                f"👤 **Cloned:** `{target_name}`{new_uname_str}{bio_disp}{dp_disp}\n"
+                f"💾 **Original Profile & Username backed up** (use `.revert` or `.dclone` to restore)"
             )
 
         except Exception as e:
@@ -277,23 +302,37 @@ def register_clone_handlers(client):
                 restored = await upload_photos_in_order(client, existing)
                 cleanup_files(existing)
 
-            # Step 3: Restore name and bio
-            await msg.edit("⏳ **[3/3] Restoring name & bio...**")
+            # Step 3: Restore name, bio & original username
+            await msg.edit("⏳ **[3/3] Restoring name, bio & username...**")
             await client(UpdateProfileRequest(
                 first_name=orig.get("first_name", ""),
                 last_name=orig.get("last_name", ""),
                 about=orig.get("bio", "")
             ))
 
-            # If username was modified, safely restore it
             orig_uname = orig.get("username", "")
+            uname_restored_str = ""
             if orig_uname:
                 try:
                     curr_me = await client.get_me()
                     if curr_me.username != orig_uname:
                         await client(UpdateUsernameRequest(username=orig_uname))
+                        uname_restored_str = f"\n🔗 **Username Restored:** @{orig_uname}"
+                        LOGS.info(f"Restored username @{orig_uname}")
+                    else:
+                        uname_restored_str = f"\n🔗 **Username:** @{orig_uname}"
                 except Exception as e:
                     LOGS.warning(f"Could not restore username @{orig_uname}: {e}")
+                    uname_restored_str = f"\n⚠️ **Username Restore Notice:** `{e}`"
+            else:
+                # If original account had NO username, clear the cloned username
+                try:
+                    curr_me = await client.get_me()
+                    if curr_me.username:
+                        await client(UpdateUsernameRequest(username=""))
+                        uname_restored_str = "\n🔗 **Username Cleared (Original had none)**"
+                except Exception:
+                    pass
 
             delete_backup(me.id)
 
@@ -301,6 +340,7 @@ def register_clone_handlers(client):
                 f"🔄 **Profile fully restored!**\n"
                 f"📸 **DP:** `{restored}` photo(s) restored\n"
                 f"👤 **Name:** `{orig.get('first_name', '')} {orig.get('last_name', '')}`.strip()"
+                f"{uname_restored_str}"
             )
 
         except Exception as e:
