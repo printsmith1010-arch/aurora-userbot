@@ -21,11 +21,13 @@ LOGS = logging.getLogger(__name__)
 
 
 def start() -> scoped_session:
-    database_url = (
-        Config.DB_URI.replace("postgres:", "postgresql:")
-        if "postgres://" in Config.DB_URI
-        else Config.DB_URI
-    )
+    db_uri = Config.DB_URI or "sqlite:///userbot.db"
+    if db_uri.startswith("postgres://"):
+        database_url = db_uri.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif db_uri.startswith("postgresql://") and not db_uri.startswith("postgresql+"):
+        database_url = db_uri.replace("postgresql://", "postgresql+psycopg2://", 1)
+    else:
+        database_url = db_uri
     engine = create_engine(database_url)
     BASE.metadata.bind = engine
     BASE.metadata.create_all(engine)
