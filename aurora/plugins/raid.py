@@ -303,13 +303,13 @@ def get_language_help_text():
 
     text += (
         "\n💡 **How To Use In Raids:**\n"
-        "• `.raid 10 te @user` — 10 Telugu raid messages\n"
-        "• `.raid 10 hi` — 10 Hindi raid messages on reply\n"
-        "• `.araid 10 kn @user` — 10 Kannada abusive lines\n"
-        "• `.sraid 5 te` — 5 Telugu romantic shayari lines\n"
-        "• `.replyraid te @user` — Auto-reply raid in Telugu\n"
-        "• `.craid 20 mr` — 20 Marathi high-speed raid lines\n"
-        "• `.stopraid` — Stop ongoing raid"
+        "• `​.raid 10 te @user` — 10 Telugu raid messages\n"
+        "• `​.raid 10 hi` — 10 Hindi raid messages on reply\n"
+        "• `​.araid 10 kn @user` — 10 Kannada abusive lines\n"
+        "• `​.sraid 5 te` — 5 Telugu romantic shayari lines\n"
+        "• `​.replyraid te @user` — Auto-reply raid in Telugu\n"
+        "• `​.craid 20 mr` — 20 Marathi high-speed raid lines\n"
+        "• `​.stopraid` — Stop ongoing raid"
     )
     return text
 
@@ -328,7 +328,7 @@ def register_raid_handlers(client):
     async def raidlangs_handler(event):
         await event.edit(get_language_help_text())
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](raid|mraid)(?:\s+([\s\S]+))?"))
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](raid|mraid)(?!\w)(?:\s+([\s\S]+))?"))
     async def raid_handler(event):
         args_str = event.pattern_match.group(2)
         if args_str and args_str.strip().lower() in ["help", "langs", "languages"]:

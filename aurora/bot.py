@@ -1065,57 +1065,53 @@ CATEGORIES_INFO = {
         "✨ **Raid 💥 Commands (Multi-Language)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.raid <count> [lang] [@username/reply]`\n"
-        "📝 **Description:** Raid with abusive messages in chosen language.\n"
+        "📝 **Description:** Raid in chosen language (default: Hindi).\n"
         "💡 **Examples:**\n"
-        "• `.raid 10 te @user` - Telugu raid\n"
-        "• `.raid 10 hi` - Hindi / Hinglish raid\n"
-        "• `.raid 10 en @user` - English raid\n"
-        "• `.raid 10 kn @user` - Kannada raid\n\n"
+        "• `.raid 10 te @user` — Telugu\n"
+        "• `.raid 10 hi @user` — Hindi\n"
+        "• `.raid 10 en @user` — English\n"
+        "• `.raid 10 kn @user` — Kannada\n\n"
         "🌐 **Language Codes:**\n"
-        "`hi` (Hindi) • `te` (Telugu) • `en` (English) • `ta` (Tamil)\n"
-        "`pa` (Punjabi) • `kn` (Kannada) • `ml` (Malayalam) • `mr` (Marathi)\n"
-        "`bn` (Bengali) • `gu` (Gujarati) • `bho` (Bhojpuri) • `hr` (Haryanvi)\n\n"
-        "🔗 **Related Commands:**\n"
-        "➤ `.stopraid` - Stop ongoing raid\n"
-        "➤ `.raidlangs` - View all language codes"
+        "`hi`=Hindi `te`=Telugu `en`=English `ta`=Tamil\n"
+        "`pa`=Punjabi `kn`=Kannada `ml`=Malayalam `mr`=Marathi\n"
+        "`bn`=Bengali `gu`=Gujarati `bho`=Bhojpuri `hr`=Haryanvi\n\n"
+        "🔗 **Related:** `.stopraid` | `.raidlangs` (view all codes)"
     ),
     "cat_araid": (
         "✨ **Abusive Raid 🔥 Commands (Multi-Language)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.araid <count> [lang] [@username/reply]`\n"
-        "📝 **Description:** Send abusive lines line-by-line in chosen language.\n"
+        "📝 **Description:** Send abusive lines in chosen language.\n"
         "💡 **Examples:**\n"
-        "• `.araid 10 te @user` (Telugu)\n"
-        "• `.araid 10 hi` (Hindi on reply)\n"
-        "• `.araid 10 mr @user` (Marathi)\n\n"
-        "🌐 **Codes:** `hi`, `te`, `en`, `ta`, `pa`, `kn`, `ml`, `mr`, `bn`, `gu`, `bho`, `hr`\n"
-        "🛑 **To Stop:** `.stopraid`"
+        "• `.araid 10 te @user` — Telugu\n"
+        "• `.araid 10 hi @user` — Hindi\n"
+        "• `.araid 10 mr @user` — Marathi\n\n"
+        "🌐 **Codes:** `hi` `te` `en` `ta` `pa` `kn` `ml` `mr` `bn` `gu` `bho` `hr`\n"
+        "🛑 **Stop:** `.stopraid`"
     ),
     "cat_sraid": (
         "✨ **Shayari Raid 💌 Commands (Multi-Language)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.sraid <count> [lang] [@username/reply]`\n"
-        "📝 **Description:** Send romantic shayari messages in chosen language.\n"
+        "📝 **Description:** Send romantic shayari in chosen language.\n"
         "💡 **Examples:**\n"
-        "• `.sraid 5 te @user` (Telugu shayari)\n"
-        "• `.sraid 5 hi` (Hindi shayari)\n"
-        "• `.sraid 5 en @user` (English shayari)\n\n"
-        "🌐 **Codes:** `te` (Telugu), `hi` (Hindi), `en` (English)\n\n"
-        "🔗 **Related Commands:**\n"
-        "➤ `.stopsraid` - Stop shayari raid"
+        "• `.sraid 5 te @user` — Telugu shayari\n"
+        "• `.sraid 5 hi @user` — Hindi shayari\n"
+        "• `.sraid 5 en @user` — English shayari\n\n"
+        "🌐 **Codes:** `te` `hi` `en` (others fallback to Hindi)\n\n"
+        "🔗 **Stop:** `.stopsraid`"
     ),
     "cat_rraid": (
         "✨ **Reply Raid 🎯 Commands (Multi-Language)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔹 `.replyraid [lang] [@username/reply]` (Alias: `.rraid`)\n"
-        "📝 **Description:** Auto-reply with abusive messages in chosen language when target speaks or tags you.\n"
+        "🔹 `.replyraid [lang] [@username/reply]` (also `.rraid`)\n"
+        "📝 **Description:** Auto-reply in chosen language when target speaks or tags you.\n"
         "💡 **Examples:**\n"
-        "• `.replyraid te @user` (Telugu reply raid)\n"
-        "• `.replyraid hi` (Hindi reply raid)\n"
-        "• `.replyraid kn @user` (Kannada reply raid)\n\n"
-        "🌐 **Codes:** `hi`, `te`, `en`, `ta`, `pa`, `kn`, `ml`, `mr`, `bn`, `gu`, `bho`, `hr`\n\n"
-        "🔗 **Related Commands:**\n"
-        "➤ `.dreplyraid [user]` - Deactivate reply raid"
+        "• `.replyraid te @user` — Telugu reply raid\n"
+        "• `.replyraid hi @user` — Hindi reply raid\n"
+        "• `.replyraid kn @user` — Kannada reply raid\n\n"
+        "🌐 **Codes:** `hi` `te` `en` `ta` `pa` `kn` `ml` `mr` `bn` `gu` `bho` `hr`\n\n"
+        "🔗 **Stop:** `.dreplyraid [user]`"
     ),
     "cat_tagging": (
         "✨ **Tagging 🔔 Commands** ✨\n"
@@ -1204,32 +1200,12 @@ CATEGORIES_INFO = {
         "✨ **CRAID ⚡ Commands (Multi-Language)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.craid <count> [lang]`\n"
-        "📝 **Description:** Super fast raid using messages in chosen language or set channel.\n"
+        "📝 **Description:** Super fast raid in chosen language.\n"
         "💡 **Examples:**\n"
-        "• `.craid 50 te` - 50 fast Telugu lines\n"
-        "• `.craid 50 hi` - 50 fast Hindi lines\n\n"
-        "🌐 **Codes:** `hi`, `te`, `en`, `ta`, `pa`, `kn`, `ml`, `mr`, etc.\n"
-        "🔗 **Related Commands:**\n"
-        "➤ `.setraid <channel_link>` - Set your personal raid channel"
-    ),
-    "cat_raidlangs": (
-        "🌐 **Aurora Raid Supported Languages & Codes** 🌐\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "Use any language code below in `.raid`, `.araid`, `.sraid`, `.replyraid`, `.craid`:\n\n"
-        "• `hi` / `hindi` — Hindi / Hinglish (Default)\n"
-        "• `te` / `telugu` — Telugu\n"
-        "• `en` / `english` — English\n"
-        "• `ta` / `tamil` — Tamil\n"
-        "• `pa` / `punjabi` — Punjabi\n"
-        "• `kn` / `kannada` — Kannada\n"
-        "• `ml` / `malayalam` — Malayalam\n"
-        "• `mr` / `marathi` — Marathi\n"
-        "• `bn` / `bengali` — Bengali\n"
-        "• `gu` / `gujarati` — Gujarati\n"
-        "• `bho` / `bhojpuri` — Bhojpuri\n"
-        "• `hr` / `haryanvi` — Haryanvi\n\n"
-        "💡 **Syntax:** `.raid <count> <lang> [@user/reply]`\n"
-        "Example: `.raid 10 te @username`"
+        "• `.craid 50 te` — 50 Telugu lines\n"
+        "• `.craid 50 hi` — 50 Hindi lines\n\n"
+        "🌐 **Codes:** `hi` `te` `en` `ta` `pa` `kn` `ml` `mr` `bn` `gu` `bho` `hr`\n\n"
+        "🔗 **Related:** `.setraid <channel_link>` - Set your personal raid channel"
     ),
     "cat_gen": (
         "✨ **General ℹ️ Commands** ✨\n"
@@ -1877,15 +1853,7 @@ async def start_aurora_bot():
                     "client": None,
                     "phone_code_hash": None,
                 }
-                await event.reply(
-                    "📱 **Enter your phone number with country code:**\n\n"
-                    "🌍 *Examples:*\n"
-                    "• India: `+91xxxxxxxxxx`\n"
-                    "• USA: `+1xxxxxxxxxx`\n"
-                    "• UK: `+44xxxxxxxxxx`\n"
-                    "• UAE: `+971xxxxxxxxxx`\n\n"
-                    "✅ *Any country is supported — just include the `+` and country code.*"
-                )
+                await event.reply("📱 **Enter Phone Number (+91xxxxxxxxxx for India or +299xxxxxx for Greenland):**")
                 return
 
             # Command: /hostsession or .hostsession (Direct StringSession Login)
@@ -2531,128 +2499,53 @@ async def start_aurora_bot():
             step = state.get("step")
 
             if step == "WAITING_PHONE":
-                phone = text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
-                if not (phone.startswith("+") and phone[1:].isdigit() and len(phone) >= 8):
-                    await event.reply(
-                        "❌ **Invalid phone format.**\n\n"
-                        "Please include country code with `+` prefix.\n"
-                        "Examples: `+91xxxxxxxxxx` (India), `+1xxxxxxxxxx` (USA), `+44xxxxxxxxxx` (UK)"
-                    )
+                phone = text.replace(" ", "").replace("-", "")
+                if not (phone.startswith("+") and phone[1:].isdigit()):
+                    await event.reply("❌ **Invalid phone format.** Enter e.g. `+91xxxxxxxxxx` or `+299xxxxxx`.")
                     return
 
                 state["phone"] = phone
-                # Detect country code for user-friendly messaging
-                cc_hint = ""
-                if phone.startswith("+91"):
-                    cc_hint = "🇮🇳 Indian number detected — connecting via best available server..."
-                elif phone.startswith("+1"):
-                    cc_hint = "🇺🇸 US number detected — connecting..."
-                elif phone.startswith("+44"):
-                    cc_hint = "🇬🇧 UK number detected — connecting..."
-                else:
-                    cc_hint = "🌍 Connecting to Telegram..."
+                msg = await event.reply("⏳ **Connecting to Telegram...**")
 
-                msg = await event.reply(f"⏳ **{cc_hint}**")
-
-                # Try all 5 Telegram DCs to maximise compatibility for every country
-                # DC2 (Europe/Amsterdam) works best for most Asian/Indian numbers
-                dc_list = [2, 1, 3, 4, 5]
-                client = None
-                code_req = None
-                last_error = None
-
-                for dc_id in dc_list:
-                    for attempt in range(2):  # retry each DC once on timeout
-                        try:
-                            await msg.edit(
-                                f"⏳ **Connecting... (DC{dc_id}, attempt {attempt + 1})**\n"
-                                f"_Trying server {dc_id} of 5 — hang tight!_"
-                            )
-                            client = TelegramClient(
-                                StringSession(),
-                                Config.API_ID,
-                                Config.API_HASH,
-                            )
-                            await asyncio.wait_for(client.connect(), timeout=45)
-                            code_req = await asyncio.wait_for(
-                                client.send_code_request(phone), timeout=60
-                            )
-                            # Success — break out of both loops
-                            last_error = None
-                            break
-                        except FloodWaitError as e:
-                            try:
-                                await client.disconnect()
-                            except Exception:
-                                pass
-                            user_login_states.pop(chat_id, None)
-                            await msg.edit(
-                                f"⏳ **Telegram Rate Limit (FloodWait)**\n\n"
-                                f"Telegram requires waiting `{e.seconds}` seconds before a new code can be sent.\n\n"
-                                f"💡 *Alternative:* Generate a session string on your PC with `python stringsetup.py` "
-                                f"and use `/hostsession <string>` to host without needing an OTP."
-                            )
-                            return
-                        except PhoneNumberInvalidError:
-                            try:
-                                await client.disconnect()
-                            except Exception:
-                                pass
-                            user_login_states.pop(chat_id, None)
-                            await msg.edit(
-                                "❌ **Invalid Phone Number.**\n\n"
-                                "Please double-check your number and country code, then try `/host` again."
-                            )
-                            return
-                        except asyncio.TimeoutError:
-                            last_error = "timeout"
-                            try:
-                                await client.disconnect()
-                            except Exception:
-                                pass
-                            if attempt == 0:
-                                await asyncio.sleep(2)
-                                continue  # retry this DC
-                            break  # move to next DC
-                        except Exception as e:
-                            last_error = e
-                            try:
-                                await client.disconnect()
-                            except Exception:
-                                pass
-                            break  # move to next DC
-                    if code_req is not None:
-                        break  # success — exit DC loop
-
-                if code_req is None:
-                    user_login_states.pop(chat_id, None)
-                    if last_error == "timeout":
-                        await msg.edit(
-                            "⏰ **All Telegram servers timed out.**\n\n"
-                            "This can happen with Indian (+91) or restricted numbers due to Telegram's regional limits.\n\n"
-                            "**Try these alternatives:**\n"
-                            "1️⃣ Run `python stringsetup.py` on your PC to generate a session string\n"
-                            "2️⃣ Send `/hostsession <string>` here to login without OTP\n"
-                            "3️⃣ Message @SpamBot on Telegram to check if your account has restrictions\n"
-                            "4️⃣ Wait 30 minutes and try again"
-                        )
-                    else:
-                        err_str = sanitize_text(str(last_error)) if last_error else "Unknown error"
-                        await msg.edit(
-                            f"❌ **Could not connect to Telegram.**\n\n"
-                            f"Error: `{err_str}`\n\n"
-                            f"💡 *Try `/hostsession <string>` instead — generate the string with `python stringsetup.py` on your PC.*"
-                        )
-                    return
-
-                state["client"] = client
-                state["phone_code_hash"] = getattr(code_req, "phone_code_hash", None)
-                state["step"] = "WAITING_OTP"
-                await msg.edit(
-                    "🔑 **OTP Sent! Enter your code (e.g., `1 2 3 4 5`):**\n\n"
-                    "📲 Check your **official Telegram app** → Service Notifications chat.\n"
-                    "⚡ *Code expires in 2 minutes. Spaces between digits are fine.*"
+                client = TelegramClient(
+                    StringSession(),
+                    Config.API_ID,
+                    Config.API_HASH,
                 )
+
+                try:
+                    await asyncio.wait_for(client.connect(), timeout=15)
+                    code_req = await asyncio.wait_for(client.send_code_request(phone), timeout=25)
+                    state["client"] = client
+                    state["phone_code_hash"] = getattr(code_req, "phone_code_hash", None)
+                    state["step"] = "WAITING_OTP"
+                    await msg.edit(
+                        "🔑 **Enter OTP (e.g., 1 2 3 4 5):**\n\n"
+                        "📲 **IMPORTANT:** Check your **official Telegram app** (Service Notifications chat) for your 5-digit login code!\n"
+                        "⚡ *OTP expires in 2 minutes.*"
+                    )
+                except FloodWaitError as e:
+                    await client.disconnect()
+                    user_login_states.pop(chat_id, None)
+                    await msg.edit(f"⏳ **Telegram Rate Limit (FloodWait):** Telegram requires waiting `{e.seconds}` seconds before requesting another code.\n\n💡 *Tip: You can also generate a session string on your PC with `python stringsetup.py` and send `/hostsession <string>` to host instantly without waiting.*")
+                except PhoneNumberInvalidError:
+                    await client.disconnect()
+                    user_login_states.pop(chat_id, None)
+                    await msg.edit("❌ **Invalid Phone Number.** Check and try /host again.")
+                except asyncio.TimeoutError:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    user_login_states.pop(chat_id, None)
+                    await msg.edit("⏰ **Connection timed out.** Telegram servers didn't respond. Send /host to try again.")
+                except Exception as e:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    user_login_states.pop(chat_id, None)
+                    await msg.edit(sanitize_text(f"❌ **Error requesting code:** `{e}`"))
 
             elif step == "WAITING_OTP":
                 code = text.replace(" ", "").replace("-", "")
@@ -2803,15 +2696,7 @@ async def start_aurora_bot():
                 "phone_code_hash": None,
             }
             try:
-                await event.respond(
-                    "📱 **Enter your phone number with country code:**\n\n"
-                    "🌍 *Examples:*\n"
-                    "• India: `+91xxxxxxxxxx`\n"
-                    "• USA: `+1xxxxxxxxxx`\n"
-                    "• UK: `+44xxxxxxxxxx`\n"
-                    "• UAE: `+971xxxxxxxxxx`\n\n"
-                    "✅ *Any country is supported — just include the `+` and country code.*"
-                )
+                await event.respond("📱 **Enter Phone Number (+91xxxxxxxxxx for India or +299xxxxxx for Greenland):**")
             except Exception:
                 pass
             return
