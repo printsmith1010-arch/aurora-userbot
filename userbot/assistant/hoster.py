@@ -50,10 +50,11 @@ Full Tutorial Bot Cmds - t.me/catuserbot_support
 CATEGORIES_INFO = {
     "cat_spam": "📨 **Spam Module Commands:**\n\n• `.spam <count> <text>` : Spams a message N times.\n• `.cspam <text>` : Spams letter by letter.\n• `.delayspam <delay> <count> <text>` : Spams with delay.\n• `.bigspam <count> <text>` : Heavy volume spam.",
     "cat_tspam": "⏰ **Timed Spam Module Commands:**\n\n• `.tspam <seconds> <text>` : Spams continuously with timer intervals.",
-    "cat_raid": "💥 **Raid Module Commands:**\n\n• `.raid <count> <username/reply>` : Initiates raid on specified user.\n• `.mraid <count> <username>` : Mention raid on target user.",
-    "cat_araid": "🔥 **Abusive Raid Module Commands:**\n\n• `.araid <count> <username>` : Sends abusive raid messages.\n• `.daraid` : Deactivates active abusive raid.",
-    "cat_sraid": "💌 **Shayari Raid Module Commands:**\n\n• `.sraid <count> <username>` : Sends Shayari raid on target user.",
-    "cat_rraid": "🎯 **Reply Raid Module Commands:**\n\n• `.rraid <reply/username>` : Activates auto-reply raid on target user.\n• `.drraid <reply/username>` : Deactivates reply raid.",
+    "cat_raid": "💥 **Raid Module Commands (Multi-Language):**\n\n• `.raid <count> [lang] <user/reply>` : Initiates raid in chosen language.\n• Languages: `hi` (Hindi), `te` (Telugu), `en`, `ta`, `pa`, `kn`, `ml`, `mr`, `bn`, `gu`, `bho`, `hr`\n• Example: `.raid 10 te @user` (Telugu) or `.raid 10 hi` (Hindi)",
+    "cat_araid": "🔥 **Abusive Raid Module Commands (Multi-Language):**\n\n• `.araid <count> [lang] <user/reply>` : Sends abusive raid messages line-by-line.\n• Languages: `hi`, `te`, `en`, `ta`, `pa`, `kn`, `ml`, `mr`, etc.\n• Example: `.araid 10 te @user`",
+    "cat_sraid": "💌 **Shayari Raid Module Commands (Multi-Language):**\n\n• `.sraid <count> [lang] <user/reply>` : Sends Shayari raid on target user.\n• Languages: `te` (Telugu), `hi` (Hindi), `en` (English)\n• Example: `.sraid 5 te @user`",
+    "cat_rraid": "🎯 **Reply Raid Module Commands (Multi-Language):**\n\n• `.rraid [lang] <user/reply>` : Activates auto-reply raid in chosen language.\n• `.drraid <user/reply>` : Deactivates reply raid.\n• Example: `.rraid te @user`",
+    "cat_raidlangs": "🌐 **Raid Languages & Codes:**\n\n• `hi` (Hindi/Hinglish)\n• `te` (Telugu)\n• `en` (English)\n• `ta` (Tamil)\n• `pa` (Punjabi)\n• `kn` (Kannada)\n• `ml` (Malayalam)\n• `mr` (Marathi)\n• `bn` (Bengali)\n• `gu` (Gujarati)\n• `bho` (Bhojpuri)\n• `hr` (Haryanvi)\n\nUsage: `.raid <count> <lang> <user>`", 
     "cat_tagging": "🔔 **Tagging Module Commands:**\n\n• `.tagall <msg>` : Tags all group members with custom message.\n• `.adminstag <msg>` : Tags all group admins.\n• `.canceltag` : Cancels ongoing tag process.",
     "cat_welcome": "🎉 **Welcome Module Commands:**\n\n• `.setwelcome <msg>` : Sets custom welcome message for group.\n• `.clearwelcome` : Clears custom welcome message.",
     "cat_mod": "🚫 **Moderation Module Commands:**\n\n• `.ban <user>` : Bans target user.\n• `.unban <user>` : Unbans target user.\n• `.mute <user>` : Mutes target user.\n• `.unmute <user>` : Unmutes target user.\n• `.kick <user>` : Kicks user from group.",
@@ -65,7 +66,7 @@ CATEGORIES_INFO = {
     "cat_bcast": "📢 **Broadcast Module Commands:**\n\n• `.gcast <msg>` : Broadcasts message across all joined groups.\n• `.broadcast <msg>` : Broadcasts to bot starters.",
     "cat_antisafe": "🛡️ **AntiSafe Module Commands:**\n\n• `.antisafe on/off` : Enables or disables anti-safety protections.",
     "cat_approve": "✅ **Approve Module Commands:**\n\n• `.approve` : Approves user to PM you.\n• `.disapprove` : Disapproves user from PM.",
-    "cat_craid": "⚡ **CRAID Module Commands:**\n\n• `.craid <count> <username>` : Launches high-speed custom raid.",
+    "cat_craid": "⚡ **CRAID Module Commands (Multi-Language):**\n\n• `.craid <count> [lang]` : Launches high-speed raid in chosen language (e.g. `.craid 50 te`).",
     "cat_autoreply": "🤖 **AutoReply Module Commands:**\n\n• `.setreply <trigger> | <response>` : Sets automated reply rule.\n• `.delreply <trigger>` : Deletes automated reply rule.",
     "cat_nuclear": "☢️ **Nuclear Clear Module Commands:**\n\n• `.purge` : Deletes all messages from replied message downwards.\n• `.del` : Deletes replied message."
 }
