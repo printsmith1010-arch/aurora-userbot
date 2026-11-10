@@ -119,3 +119,16 @@ class AllowedUser(Base):
     username = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+
+class SudoUser(Base):
+    __tablename__ = "sudo_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    def __repr__(self):
+        return f"<SudoUser(user_id={self.user_id}, username={self.username})>"
+
+

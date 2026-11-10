@@ -7,7 +7,18 @@ Initializes SQLAlchemy database engine, connection pool, scoped sessions, and ta
 from sqlalchemy import create_engine
 from sqlalchemy.orm import scoped_session, sessionmaker
 from aurora.config import Config
-from aurora.db.models import Base
+from aurora.db.models import (
+    Base,
+    User,
+    UserSession,
+    PluginModel,
+    BotGroup,
+    GBanUser,
+    BlockedUser,
+    ApprovedGroupUser,
+    AllowedUser,
+    SudoUser,
+)
 
 
 def get_engine():

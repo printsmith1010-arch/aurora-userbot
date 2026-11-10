@@ -23,7 +23,7 @@ from telethon.sessions import MemorySession, StringSession
 
 from aurora.config import Config, sanitize_text
 from aurora.core.session_manager import session_manager
-from aurora.db.models import User, UserSession, BotGroup, GBanUser, BlockedUser, ApprovedGroupUser, AllowedUser
+from aurora.db.models import User, UserSession, BotGroup, GBanUser, BlockedUser, ApprovedGroupUser, AllowedUser, SudoUser
 from aurora.db.session import db_session, init_db
 
 LOGS = logging.getLogger("AuroraHosterBot")
@@ -32,7 +32,7 @@ user_login_states = {}
 start_time = datetime.utcnow()
 BLOCKED_USERS = {}
 ALLOWED_USERS = {}
-SUDO_USERS = {Config.OWNER_ID}
+SUDO_USERS = {Config.OWNER_ID, str(Config.OWNER_ID)}
 GBAN_LIST = {}
 APPROVED_USERS_PER_GROUP = {}
 BOT_GROUPS = {}
@@ -40,32 +40,80 @@ main_bot_client = None
 gban_sync_lock = asyncio.Lock()
 
 
+def is_owner(sender_id, username=None):
+    """
+    Returns True ONLY for the platform Owner.
+    Only the Owner is allowed to add or remove Sudo Users / Admins.
+    """
+    if sender_id is not None:
+        if sender_id == Config.OWNER_ID or str(sender_id) == str(Config.OWNER_ID):
+            return True
+        try:
+            if int(sender_id) == int(Config.OWNER_ID):
+                return True
+        except Exception:
+            pass
+    if username and getattr(Config, "OWNER_USERNAME", None):
+        u = username.lower().lstrip("@")
+        o = Config.OWNER_USERNAME.lower().lstrip("@")
+        if u == o:
+            return True
+    return False
+
+
+def is_admin_or_owner(sender_id, username=None):
+    """
+    Returns True for Owner AND Sudo Admins.
+    Owner and Admins have identical permissions for all moderation, broadcast, allow/block, and info commands.
+    """
+    if is_owner(sender_id, username):
+        return True
+
+    if sender_id is not None:
+        if sender_id in SUDO_USERS or str(sender_id) in SUDO_USERS:
+            return True
+        try:
+            if int(sender_id) in SUDO_USERS:
+                return True
+        except Exception:
+            pass
+
+    if username:
+        u = username.lower().lstrip("@")
+        if u in SUDO_USERS or f"@{u}" in SUDO_USERS:
+            return True
+
+    return False
+
+
 def is_user_allowed_to_use(user_id, username=None):
     """
     Checks if a user is authorized to use or host the Aurora bot/userbot.
     Owners and Sudo Admins are always authorized.
     Normal users must be explicitly granted access via /allow.
+    Blocked users are always denied.
     """
     u_id_str = str(user_id)
     u_name = (username or "").lower().lstrip("@")
     u_name_key = f"@{u_name}" if u_name else ""
 
-    # 1. Owner is always allowed
-    if user_id == Config.OWNER_ID or u_id_str == str(Config.OWNER_ID):
-        return True
-
-    # 2. Sudo Admins are always allowed
+    # Check Blocked Users first
     if (
-        user_id in SUDO_USERS
-        or u_id_str in SUDO_USERS
-        or u_name in SUDO_USERS
-        or u_name_key in SUDO_USERS
+        user_id in BLOCKED_USERS
+        or u_id_str in BLOCKED_USERS
+        or (u_name and u_name in BLOCKED_USERS)
+        or (u_name_key and u_name_key in BLOCKED_USERS)
     ):
+        return False
+
+    # Owner & Sudo Admins are always allowed
+    if is_admin_or_owner(user_id, username):
         return True
 
-    # 3. Allowed Users check
+    # Allowed Users check
     if (
-        u_id_str in ALLOWED_USERS
+        user_id in ALLOWED_USERS
+        or u_id_str in ALLOWED_USERS
         or (u_name and u_name in ALLOWED_USERS)
         or (u_name_key and u_name_key in ALLOWED_USERS)
     ):
@@ -92,10 +140,12 @@ RESERVED_GBAN_KEYWORDS = {"list", "gbanlist", "listgban", "help", "start", "canc
 
 
 def load_persistent_data():
-    """Loads persistent GBan, BlockedUsers, BotGroups, and ApprovedGroupUsers from database."""
+    """Loads persistent GBan, BlockedUsers, BotGroups, ApprovedGroupUsers, AllowedUsers, and SudoUsers from database."""
     try:
+        init_db()
         with db_session() as session:
             # Load Bot Groups
+            BOT_GROUPS.clear()
             for g in session.query(BotGroup).all():
                 BOT_GROUPS[g.group_id] = g.title or "Group"
 
@@ -107,13 +157,22 @@ def load_persistent_data():
                     GBAN_LIST[norm] = gb.reason
 
             # Load Blocked Users
+            BLOCKED_USERS.clear()
             for bu in session.query(BlockedUser).all():
                 info = {"id": bu.user_id, "username": bu.username or "N/A"}
                 BLOCKED_USERS[bu.user_id] = info
+                try:
+                    BLOCKED_USERS[int(bu.user_id)] = info
+                except Exception:
+                    pass
                 if bu.username:
+                    b_clean = bu.username.lower().lstrip("@")
                     BLOCKED_USERS[bu.username.lower()] = info
+                    BLOCKED_USERS[b_clean] = info
+                    BLOCKED_USERS[f"@{b_clean}"] = info
 
             # Load Approved Group Users
+            APPROVED_USERS_PER_GROUP.clear()
             for ap in session.query(ApprovedGroupUser).all():
                 if ap.group_id not in APPROVED_USERS_PER_GROUP:
                     APPROVED_USERS_PER_GROUP[ap.group_id] = set()
@@ -124,9 +183,42 @@ def load_persistent_data():
             for al in session.query(AllowedUser).all():
                 info = {"id": al.user_id, "username": al.username or "N/A"}
                 ALLOWED_USERS[al.user_id] = info
+                try:
+                    ALLOWED_USERS[int(al.user_id)] = info
+                except Exception:
+                    pass
                 if al.username:
+                    a_clean = al.username.lower().lstrip("@")
                     ALLOWED_USERS[al.username.lower()] = info
-        LOGS.info(f"Loaded {len(BOT_GROUPS)} bot groups, {len(GBAN_LIST)} gban users, {len(BLOCKED_USERS)} blocked users, {len(ALLOWED_USERS)} allowed users from DB.")
+                    ALLOWED_USERS[a_clean] = info
+                    ALLOWED_USERS[f"@{a_clean}"] = info
+
+            # Load Sudo Users (Admins)
+            SUDO_USERS.clear()
+            SUDO_USERS.add(Config.OWNER_ID)
+            SUDO_USERS.add(str(Config.OWNER_ID))
+            if getattr(Config, "OWNER_USERNAME", None):
+                o_uname = Config.OWNER_USERNAME.lower().lstrip("@")
+                SUDO_USERS.add(o_uname)
+                SUDO_USERS.add(f"@{o_uname}")
+
+            for su in session.query(SudoUser).all():
+                SUDO_USERS.add(su.user_id)
+                try:
+                    SUDO_USERS.add(int(su.user_id))
+                except Exception:
+                    pass
+                if su.username:
+                    s_clean = su.username.lower().lstrip("@")
+                    SUDO_USERS.add(su.username.lower())
+                    SUDO_USERS.add(s_clean)
+                    SUDO_USERS.add(f"@{s_clean}")
+
+        LOGS.info(
+            f"Loaded {len(BOT_GROUPS)} bot groups, {len(GBAN_LIST)} gban users, "
+            f"{len(BLOCKED_USERS)} blocked users, {len(ALLOWED_USERS)} allowed users, "
+            f"{len(SUDO_USERS)} sudo entries from DB."
+        )
     except Exception as e:
         LOGS.error(f"Error loading persistent DB data: {e}")
 
@@ -401,67 +493,73 @@ async def resolve_target(client, target):
 
 async def execute_global_broadcast(msg_text, reply_msg=None, event=None):
     """
-    Executes a global broadcast across ALL platform groups.
-    Attempts broadcast first via Telegram Bot Account, then via active Userbots for remaining groups.
+    Executes a global broadcast strictly via the Telegram Bot Account across all groups where the bot is present.
     """
-    all_groups = await get_all_platform_groups(main_bot_client)
+    b_client = main_bot_client
+    if not b_client or not b_client.is_connected():
+        return "❌ **Telegram Bot Account is not connected.**"
+
+    load_persistent_data()
+    all_groups = list(BOT_GROUPS.keys())
     total_groups = len(all_groups)
 
     if total_groups == 0:
-        return "ℹ️ **No active groups recorded across platform.**"
+        return "ℹ️ **No active groups recorded where the bot is present.**"
 
     sent_bot = 0
-    sent_ub = 0
-    sent_chat_ids = set()
+    failed = 0
 
-    # 1. Attempt broadcast via Bot Account to known BOT_GROUPS
-    b_client = main_bot_client
-    if b_client and b_client.is_connected():
-        load_persistent_data()
-        for g_id in list(BOT_GROUPS.keys()):
-            try:
-                if reply_msg:
-                    await b_client.send_message(g_id, reply_msg)
-                else:
-                    await b_client.send_message(g_id, msg_text)
-                sent_bot += 1
-                sent_chat_ids.add(g_id)
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                LOGS.debug(f"Bot failed to send broadcast to group {g_id}: {e}")
-
-    # 2. Attempt broadcast via Hosted Userbots for remaining groups in all_groups
-    active_users = session_manager.get_all_active_users()
-    for uid in active_users:
-        u_client = session_manager.get_active_client(uid)
-        if u_client and u_client.is_connected():
-            try:
-                async for dialog in u_client.iter_dialogs():
-                    if is_group_dialog(dialog) and dialog.id not in sent_chat_ids:
-                        g_id = dialog.id
-                        try:
-                            if reply_msg:
-                                await u_client.send_message(g_id, reply_msg)
-                            else:
-                                await u_client.send_message(g_id, msg_text)
-                            sent_ub += 1
-                            sent_chat_ids.add(g_id)
-                            await asyncio.sleep(0.3)
-                        except Exception as e:
-                            LOGS.debug(f"Userbot {uid} failed to send broadcast to group {g_id}: {e}")
-            except Exception as e:
-                LOGS.error(f"Error executing userbot broadcast for {uid}: {e}")
-
-    total_sent = len(sent_chat_ids)
-    failed = max(0, total_groups - total_sent)
+    for g_id in all_groups:
+        try:
+            if reply_msg:
+                await b_client.send_message(g_id, reply_msg)
+            else:
+                await b_client.send_message(g_id, msg_text)
+            sent_bot += 1
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            failed += 1
+            LOGS.debug(f"Bot failed to broadcast to group {g_id}: {e}")
 
     res = (
         f"📢 **Global Broadcast Complete!**\n\n"
         f"🤖 **Sent by Bot Account in:** `{sent_bot}` groups\n"
-        f"⚡ **Sent by Hosted Userbots in:** `{sent_ub}` groups\n"
         f"❌ **Failed in:** `{failed}` groups\n"
-        f"📊 **Total Groups Broadcasted:** `{total_sent}` / `{total_groups}` groups"
+        f"📊 **Total Bot Groups:** `{total_groups}`"
     )
+    return res
+
+
+async def get_bot_admin_groups_list(bot=None):
+    """
+    Returns a formatted list of all groups where the Telegram Bot Account is present and has admin access.
+    """
+    b_client = bot or main_bot_client
+    if not b_client or not b_client.is_connected():
+        return "❌ **Telegram Bot Account is not connected.**"
+
+    load_persistent_data()
+    if not BOT_GROUPS:
+        return "ℹ️ **No groups recorded where the bot is present.**"
+
+    admin_groups = []
+    for g_id in list(BOT_GROUPS.keys()):
+        try:
+            eligible, title, _ = await check_group_eligibility(b_client, g_id)
+            if eligible:
+                admin_groups.append((g_id, title))
+        except Exception as e:
+            LOGS.debug(f"Error checking admin status for {g_id}: {e}")
+
+    if not admin_groups:
+        return "ℹ️ **The bot is not an admin in any group currently.**"
+
+    res = f"🛡️ **Bot Admin Groups List (`{len(admin_groups)}` groups):**\n\n"
+    for g_id, g_name in admin_groups:
+        res += f"• **{g_name}** (ID: `{g_id}`)\n"
+
+    if len(res) > 3900:
+        res = res[:3900] + "\n\n...[List Truncated]"
     return res
 
 
@@ -1020,14 +1118,17 @@ HELP_TEXT = """🔹 /start - Launch the Bot with a Grand Welcome
 🔹 /refresh - Refresh Bot State (Owners Only)
 🔹 /status - Check Your Userbot's Pulse
 🔹 /logout - Safely Log Out Your Userbot
-🔹 /sudolist - View Sudo Users (Owners Only)
+🔹 /sudolist - View Sudo Users (Owner/Admin)
 🔹 /setdp - Set Display Photo (Owners Only)
 🔹 /allow - Authorize a User to Host/Use Bot (Owner/Admin)
 🔹 /disallow - Revoke User Authorization (Owner/Admin)
 🔹 /allowedlist - View Authorized Users (Owner/Admin)
-🔹 /block - Block a User (Owners Only)
-🔹 /unblock - Unblock a User (Owners Only)
-🔹 /blockeduser - View Blocked Users (Owners Only)
+🔹 /block - Block a User (Owner/Admin)
+🔹 /unblock - Unblock a User (Owner/Admin)
+🔹 /blockeduser - View Blocked Users (Owner/Admin)
+🔹 /glist - Groups Where Bot Has Admin Access (Owner/Admin)
+🔹 /gbroadcast - Broadcast to All Bot Groups via Bot Account (Owner/Admin)
+🔹 .broadcast - Broadcast to All Joined Groups via User Account
 🔹 /stats - View Bot Statistics"""
 
 COMMANDS_HEADER = """✨ **Userbot Commands - Premium Aurora!** ✨
@@ -1126,14 +1227,14 @@ CATEGORIES_INFO = {
         "   💡 **Example:** `.stoptagall 101`"
     ),
     "cat_welcome": (
-        "✨ **Welcome 🎉 Commands** ✨\n"
+        "✨ **Welcome 🎉 Commands (DMs Only)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.setwlcm <message>`\n"
-        "📝 **Description:** Set custom welcome message.\n"
+        "📝 **Description:** Set custom welcome message for incoming DMs only (never sent in groups).\n"
         "💡 **Example:** `.setwlcm Welcome!`\n\n"
         "🔗 **Related Commands:**\n"
-        "➤ `.stopwlcm`  📝 **Description:** Disable welcome.\n"
-        "➤ `.wlcmmssg`  📝 **Description:** Reset welcome."
+        "➤ `.stopwlcm`  📝 **Description:** Disable DM welcome.\n"
+        "➤ `.wlcmmssg`  📝 **Description:** Reset DM welcome."
     ),
     "cat_mod": (
         "✨ **Moderation 🚫 Commands** ✨\n"
@@ -1154,47 +1255,59 @@ CATEGORIES_INFO = {
     "cat_owner": (
         "✨ **Owner 👑 Commands** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "👑 **Owner-Exclusive Permissions:**\n"
         "🔹 `/addsudousers <@username/id>`\n"
-        "📝 **Description:** Add a Sudo user (Admin) to the bot.\n"
-        "💡 **Example:** `/addsudousers @username`\n\n"
+        "   📝 Add a Sudo user / Admin to the bot (Owner Only).\n"
         "🔹 `/removesodousers <@username/id>`\n"
-        "📝 **Description:** Remove a Sudo user (Admin) from the bot.\n"
-        "💡 **Example:** `/removesodousers @username`\n\n"
-        "🔹 `/listsudousers` (or `/sudolist`)\n"
-        "📝 **Description:** List all Sudo users (Admins).\n\n"
-        "🔹 `/allow <@username/id>`\n"
-        "📝 **Description:** Authorize user to host/use the userbot.\n\n"
-        "🔹 `/disallow <@username/id>`\n"
-        "📝 **Description:** Revoke user authorization.\n\n"
-        "🔹 `/allowedlist`\n"
-        "📝 **Description:** List all authorized users."
+        "   📝 Remove a Sudo user / Admin from the bot (Owner Only).\n\n"
+        "🛡️ **Admin & Moderation Permissions (Allowed to both Owner & Admins):**\n"
+        "🔹 `/allow <@username/id>` - Authorize user to host/use userbot\n"
+        "🔹 `/disallow <@username/id>` - Revoke user authorization\n"
+        "🔹 `/allowedlist` - List authorized users\n"
+        "🔹 `/block <@username/id>` - Block user from bot\n"
+        "🔹 `/unblock <@username/id>` - Unblock user\n"
+        "🔹 `/blockeduser` - List blocked users\n"
+        "🔹 `/gbroadcast <message>` - Broadcast via bot account to bot groups\n"
+        "🔹 `/glist` - List groups where bot has admin access\n"
+        "🔹 `/listsudousers` - View all Sudo Admins\n"
+        "🔹 `/restartall` | `/refresh` - Platform maintenance"
     ),
     "cat_admin": (
-        "✨ **Admin 🔧 Commands** ✨\n"
+        "✨ **Admin 🔧 Commands (Owner & Admins)** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `/gban <@username/id> [reason]` (or `.gban`)\n"
-        "📝 **Description:** Global ban a user across all groups.\n"
-        "💡 **Example:** `/gban @username Spamming`\n\n"
+        "   📝 Global ban user across all groups.\n"
         "🔹 `/gunban <@username/id>` (or `.gunban`)\n"
-        "📝 **Description:** Global unban a user across all groups.\n"
-        "💡 **Example:** `/gunban @username`\n\n"
-        "🔹 `/listgban` (or `/gbanlist`)\n"
-        "📝 **Description:** List all globally banned users.\n\n"
-        "🔹 `/gbroadcast <message>` (or `.gbroadcast`)\n"
-        "📝 **Description:** Broadcast a message to all groups where the bot/userbots are present.\n\n"
+        "   📝 Global unban user across all groups.\n"
+        "🔹 `/listgban` - View globally banned users.\n\n"
         "🔹 `/allow <@username/id>` (or `.allow`)\n"
-        "📝 **Description:** Authorize a user to host and use the userbot.\n\n"
+        "   📝 Authorize a user to host and use userbot.\n"
         "🔹 `/disallow <@username/id>` (or `.disallow`)\n"
-        "📝 **Description:** Revoke user authorization.\n\n"
-        "🔹 `/allowedlist` (or `.allowedlist`)\n"
-        "📝 **Description:** List all authorized users."
+        "   📝 Revoke user authorization.\n"
+        "🔹 `/allowedlist` - View all authorized users.\n\n"
+        "🔹 `/block <@username/id>` (or `.block`)\n"
+        "   📝 Block a user from using the bot.\n"
+        "🔹 `/unblock <@username/id>` (or `.unblock`)\n"
+        "   📝 Unblock a user.\n"
+        "🔹 `/blockeduser` - View all blocked users.\n\n"
+        "🔹 `/gbroadcast <message>` (or `.gbroadcast`)\n"
+        "   📝 Broadcast via Bot Account to all groups bot is present in.\n"
+        "🔹 `/glist` (or `.glist`)\n"
+        "   📝 View all groups where the bot is present and has admin access.\n"
+        "🔹 `/listgroups` - View all platform group memberships.\n"
+        "🔹 `/listsudousers` - View all Sudo Admins."
     ),
     "cat_bcast": (
-        "✨ **Broadcast Commands** ✨\n"
+        "✨ **Broadcast 📢 Commands** ✨\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔹 `.broadcast <message>`\n"
-        "📝 **Description:** Broadcast a message to all groups where messaging is allowed.\n"
-        "💡 **Example:** `.broadcast Hello everyone!`"
+        "   📝 **User Local Broadcast:** Sent from YOUR userbot account to all groups you are joined in.\n"
+        "   💡 **Example:** `.broadcast Hello everyone!`\n\n"
+        "🔹 `/gbroadcast <message>` (or `.gbroadcast`)\n"
+        "   📝 **Bot Global Broadcast:** Sent by the BOT ACCOUNT to all groups where the bot is present (Owner/Admin).\n"
+        "   💡 **Example:** `/gbroadcast Welcome to Aurora Userbot Network!`\n\n"
+        "🔹 `/glist` (or `.glist`)\n"
+        "   📝 **Bot Admin Groups:** Lists all groups where the bot is present and has admin rights (Owner/Admin)."
     ),
     "cat_craid": (
         "✨ **CRAID ⚡ Commands (Multi-Language)** ✨\n"
@@ -1461,14 +1574,14 @@ async def start_aurora_bot():
             if not cmd:
                 return
 
-            is_owner_admin = (sender_id == Config.OWNER_ID or sender_id in SUDO_USERS or sender_id_str in SUDO_USERS)
+            is_owner_admin = is_admin_or_owner(sender_id, uname)
 
-            # Owner & Bot Admin commands (Strictly restricted)
+            # Owner & Bot Admin commands
             OWNER_ADMIN_COMMANDS = {
                 "gban", "gunban", "gbanlist", "listgban",
                 "addsudo", "addsudousers", "rmsudo", "removesodousers", "removesudouser",
                 "listsudousers", "sudolist", "adminlist",
-                "listgroups", "gbroadcast", "gcast",
+                "listgroups", "gbroadcast", "gcast", "glist",
                 "restartall", "refresh",
                 "block", "unblock", "blockeduser", "listblock",
                 "allow", "disallow", "allowedlist"
@@ -1533,21 +1646,168 @@ async def start_aurora_bot():
                         res = res[:3900] + "\n\n...[List Truncated]"
                     await msg.edit(res)
                     return
+                elif cmd == "glist":
+                    msg = await event.reply("⏳ **Fetching groups where bot has admin access...**")
+                    res = await get_bot_admin_groups_list(bot)
+                    await msg.edit(res)
+                    return
                 elif cmd in ["addsudousers", "addsudo"]:
+                    if not is_owner(sender_id, uname):
+                        await event.reply("⛔ **Owner privileges required.** Only the platform owner can add sudo admins.")
+                        return
                     target = text[len(first_word):].strip()
                     if not target:
                         await event.reply("💡 **Usage:** `.addsudousers <@username or user_id>`")
                         return
-                    SUDO_USERS.add(target)
-                    await event.reply(f"👑 **Added Admin/Sudo User:** `{target}`")
+                    s_id = target
+                    s_name = None
+                    try:
+                        target_ent = await bot.get_entity(target if not target.lstrip("-").isdigit() else int(target))
+                        s_id = str(target_ent.id)
+                        s_name = getattr(target_ent, "username", None)
+                    except Exception:
+                        if target.startswith("@"):
+                            s_name = target[1:]
+                        else:
+                            s_id = target
+
+                    SUDO_USERS.add(s_id)
+                    try:
+                        SUDO_USERS.add(int(s_id))
+                    except Exception:
+                        pass
+                    if s_name:
+                        s_clean = s_name.lower().lstrip("@")
+                        SUDO_USERS.add(s_name.lower())
+                        SUDO_USERS.add(s_clean)
+                        SUDO_USERS.add(f"@{s_clean}")
+
+                    try:
+                        with db_session() as session:
+                            existing = session.query(SudoUser).filter(SudoUser.user_id == s_id).first()
+                            if not existing:
+                                session.add(SudoUser(user_id=s_id, username=s_name))
+                            session.commit()
+                    except Exception as e:
+                        LOGS.error(f"Error saving SudoUser: {e}")
+
+                    display = f"@{s_name} (ID: `{s_id}`)" if s_name else f"ID: `{s_id}`"
+                    await event.reply(f"👑 **Added Sudo Admin:** {display}")
                     return
                 elif cmd in ["removesodousers", "rmsudo", "removesudouser"]:
+                    if not is_owner(sender_id, uname):
+                        await event.reply("⛔ **Owner privileges required.** Only the platform owner can remove sudo admins.")
+                        return
                     target = text[len(first_word):].strip()
                     if not target:
                         await event.reply("💡 **Usage:** `.removesodousers <@username or user_id>`")
                         return
+                    target_clean = target.lower().lstrip("@")
+                    removed_id = None
+                    try:
+                        with db_session() as session:
+                            for su in session.query(SudoUser).all():
+                                if su.user_id == target or (su.username and su.username.lower().lstrip("@") == target_clean):
+                                    removed_id = su.user_id
+                                    session.delete(su)
+                            session.commit()
+                    except Exception as e:
+                        LOGS.error(f"Error removing SudoUser: {e}")
+
                     SUDO_USERS.discard(target)
-                    await event.reply(f"🛑 **Removed Admin/Sudo User:** `{target}`")
+                    SUDO_USERS.discard(target_clean)
+                    SUDO_USERS.discard(f"@{target_clean}")
+                    if removed_id:
+                        SUDO_USERS.discard(removed_id)
+                        try:
+                            SUDO_USERS.discard(int(removed_id))
+                        except Exception:
+                            pass
+                    await event.reply(f"🛑 **Removed Sudo Admin:** `{target}`")
+                    return
+                elif cmd == "block":
+                    target = text[len(first_word):].strip()
+                    if not target:
+                        reply = await event.get_reply_message()
+                        if reply and reply.sender_id:
+                            target = str(reply.sender_id)
+                    if not target:
+                        await event.reply("💡 **Usage:** `.block <@username or user_id>` or reply to a user")
+                        return
+                    b_id = target
+                    b_name = ""
+                    try:
+                        entity = await bot.get_entity(target if not target.lstrip("-").isdigit() else int(target))
+                        b_id = str(entity.id)
+                        if getattr(entity, "username", None):
+                            b_name = f"@{entity.username}"
+                    except Exception:
+                        if target.startswith("@"):
+                            b_name = target
+                        else:
+                            b_id = target
+                    info = {"id": b_id, "username": b_name or "N/A"}
+                    BLOCKED_USERS[b_id] = info
+                    try:
+                        BLOCKED_USERS[int(b_id)] = info
+                    except Exception:
+                        pass
+                    if b_name:
+                        b_clean = b_name.lower().lstrip("@")
+                        BLOCKED_USERS[b_name.lower()] = info
+                        BLOCKED_USERS[b_clean] = info
+                        BLOCKED_USERS[f"@{b_clean}"] = info
+                    try:
+                        with db_session() as session:
+                            existing = session.query(BlockedUser).filter(BlockedUser.user_id == b_id).first()
+                            if not existing:
+                                session.add(BlockedUser(user_id=b_id, username=b_name))
+                            session.commit()
+                    except Exception as e:
+                        LOGS.error(f"Error saving BlockedUser: {e}")
+                    u_str = f"{b_name} (ID: `{b_id}`)" if b_name else f"ID: `{b_id}`"
+                    await event.reply(f"🚫 **Blocked User:** {u_str}")
+                    return
+                elif cmd == "unblock":
+                    target = text[len(first_word):].strip()
+                    if not target:
+                        reply = await event.get_reply_message()
+                        if reply and reply.sender_id:
+                            target = str(reply.sender_id)
+                    if not target:
+                        await event.reply("💡 **Usage:** `.unblock <@username or user_id>` or reply to a user")
+                        return
+                    removed = False
+                    target_lower = target.lower().lstrip("@")
+                    for k in list(BLOCKED_USERS.keys()):
+                        if str(k).lower().lstrip("@") == target_lower or str(BLOCKED_USERS[k].get("id")) == target:
+                            r_id = BLOCKED_USERS[k].get("id")
+                            BLOCKED_USERS.pop(k, None)
+                            removed = True
+                            try:
+                                with db_session() as session:
+                                    session.query(BlockedUser).filter(
+                                        (BlockedUser.user_id == str(r_id)) | (BlockedUser.username == k)
+                                    ).delete(synchronize_session=False)
+                                    session.commit()
+                            except Exception:
+                                pass
+                    if removed:
+                        await event.reply(f"✅ **Unblocked User:** `{target}`")
+                    else:
+                        await event.reply(f"ℹ️ **User `{target}` is not in blocked list.**")
+                    return
+                elif cmd in ["listblock", "blockeduser"]:
+                    unique_blocked = {}
+                    for info in BLOCKED_USERS.values():
+                        unique_blocked[info["id"]] = info.get("username") or "N/A"
+                    if not unique_blocked:
+                        await event.reply("ℹ️ **No users currently blocked.**")
+                        return
+                    res = f"🚫 **Blocked Users List (`{len(unique_blocked)}`):**\n\n"
+                    for b_id, b_name in unique_blocked.items():
+                        res += f"• `{b_name}` (ID: `{b_id}`)\n"
+                    await event.reply(res)
                     return
                 elif cmd == "allow":
                     target = text[len(first_word):].strip()
@@ -2098,10 +2358,10 @@ async def start_aurora_bot():
                     await event.reply("ℹ️ **You are not currently logged in.** Send /host to deploy your userbot.")
                 return
 
-            # Command: /listsudousers & /sudolist & /adminlist & .listsudousers & .sudolist & .adminlist (Owner Only)
+            # Command: /listsudousers & /sudolist & /adminlist & .listsudousers & .sudolist & .adminlist (Owner & Admin)
             if cmd in ["listsudousers", "sudolist", "adminlist"]:
-                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS:
-                    await event.reply("⛔ **Only platform owner/admin can access this menu!**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 res = await get_formatted_admin_list(bot)
                 await event.reply(res)
@@ -2109,34 +2369,86 @@ async def start_aurora_bot():
 
             # Command: /addsudousers /addsudo .addsudousers .addsudo (Owner Only)
             if cmd in ["addsudousers", "addsudo"]:
-                if chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Owner privileges required.**")
+                if not is_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner privileges required.** Only the platform owner can add sudo admins.")
                     return
                 target = text[len(text.split()[0]):].strip()
                 if not target:
                     await event.reply("💡 **Usage:** `/addsudousers <@username or user_id>`")
                     return
-                SUDO_USERS.add(target)
-                await event.reply(f"👑 **Added Admin/Sudo User:** `{target}`")
+                s_id = target
+                s_name = None
+                try:
+                    target_ent = await bot.get_entity(target if not target.lstrip("-").isdigit() else int(target))
+                    s_id = str(target_ent.id)
+                    s_name = getattr(target_ent, "username", None)
+                except Exception:
+                    if target.startswith("@"):
+                        s_name = target[1:]
+                    else:
+                        s_id = target
+
+                SUDO_USERS.add(s_id)
+                try:
+                    SUDO_USERS.add(int(s_id))
+                except Exception:
+                    pass
+                if s_name:
+                    s_clean = s_name.lower().lstrip("@")
+                    SUDO_USERS.add(s_name.lower())
+                    SUDO_USERS.add(s_clean)
+                    SUDO_USERS.add(f"@{s_clean}")
+
+                try:
+                    with db_session() as session:
+                        existing = session.query(SudoUser).filter(SudoUser.user_id == s_id).first()
+                        if not existing:
+                            session.add(SudoUser(user_id=s_id, username=s_name))
+                        session.commit()
+                except Exception as e:
+                    LOGS.error(f"Error saving SudoUser: {e}")
+
+                display = f"@{s_name} (ID: `{s_id}`)" if s_name else f"ID: `{s_id}`"
+                await event.reply(f"👑 **Added Sudo Admin:** {display}")
                 return
 
             # Command: /removesodousers /rmsudo /removesudouser .removesodousers .rmsudo (Owner Only)
             if cmd in ["removesodousers", "rmsudo", "removesudouser"]:
-                if chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Owner privileges required.**")
+                if not is_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner privileges required.** Only the platform owner can remove sudo admins.")
                     return
                 target = text[len(text.split()[0]):].strip()
                 if not target:
                     await event.reply("💡 **Usage:** `/removesodousers <@username or user_id>`")
                     return
+                target_clean = target.lower().lstrip("@")
+                removed_id = None
+                try:
+                    with db_session() as session:
+                        for su in session.query(SudoUser).all():
+                            if su.user_id == target or (su.username and su.username.lower().lstrip("@") == target_clean):
+                                removed_id = su.user_id
+                                session.delete(su)
+                        session.commit()
+                except Exception as e:
+                    LOGS.error(f"Error removing SudoUser: {e}")
+
                 SUDO_USERS.discard(target)
-                await event.reply(f"🛑 **Removed Admin/Sudo User:** `{target}`")
+                SUDO_USERS.discard(target_clean)
+                SUDO_USERS.discard(f"@{target_clean}")
+                if removed_id:
+                    SUDO_USERS.discard(removed_id)
+                    try:
+                        SUDO_USERS.discard(int(removed_id))
+                    except Exception:
+                        pass
+                await event.reply(f"🛑 **Removed Sudo Admin:** `{target}`")
                 return
 
             # Command: /listgroups or .listgroups (Admin & Owner)
             if cmd == "listgroups":
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
 
                 msg = await event.reply("⏳ **Fetching all platform group memberships...**")
@@ -2156,9 +2468,19 @@ async def start_aurora_bot():
                 await msg.edit(res)
                 return
 
+            # Command: /glist or .glist (Admin & Owner)
+            if cmd == "glist":
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
+                    return
+                msg = await event.reply("⏳ **Fetching groups where bot has admin access...**")
+                res = await get_bot_admin_groups_list(bot)
+                await msg.edit(res)
+                return
+
             # Command: /clearbotgroups (Owner Only)
             if cmd == "clearbotgroups":
-                if chat_id != Config.OWNER_ID:
+                if not is_owner(chat_id, uname):
                     await event.reply("⛔ **Owner privileges required.**")
                     return
                 BOT_GROUPS.clear()
@@ -2173,8 +2495,8 @@ async def start_aurora_bot():
 
             # Command: /gban or .gban (Admin & Owner)
             if cmd == "gban":
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID and str(chat_id) not in SUDO_USERS:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 input_str = text[len(first_word):].strip()
                 raw_target, target_entity, reason = await resolve_gban_event_target(bot, event, input_str)
@@ -2189,8 +2511,8 @@ async def start_aurora_bot():
 
             # Command: /gunban or .gunban (Admin & Owner)
             if cmd == "gunban":
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID and str(chat_id) not in SUDO_USERS:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 input_str = text[len(first_word):].strip()
                 target, target_entity = await resolve_gunban_event_target(bot, event, input_str)
@@ -2202,10 +2524,10 @@ async def start_aurora_bot():
                 await msg.edit(res)
                 return
 
-            # Command: /listgban & /gbanlist & .listgban & .gbanlist
+            # Command: /listgban & /gbanlist & .listgban & .gbanlist (Admin & Owner)
             if cmd in ["listgban", "gbanlist"]:
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
 
                 res = await get_formatted_gban_list(bot)
@@ -2214,8 +2536,8 @@ async def start_aurora_bot():
 
             # Command: /gbroadcast or .gbroadcast or /gcast or .gcast (Admin & Owner)
             if cmd in ["gbroadcast", "gcast"]:
-                if chat_id not in SUDO_USERS and chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Admin / Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 reply = await event.get_reply_message()
                 msg_text = text[len(text.split()[0]):].strip()
@@ -2226,25 +2548,29 @@ async def start_aurora_bot():
                     await event.reply("💡 **Usage:** `/gbroadcast <message>` or reply to a message")
                     return
 
-                msg = await event.reply("📢 **Sending Global Broadcast across Aurora platform...**")
+                msg = await event.reply("📢 **Sending Global Broadcast via Bot Account...**")
                 res = await execute_global_broadcast(msg_text, reply_msg=reply, event=event)
                 await msg.edit(res)
                 return
 
-            # Command: /block or .block (Owner Only)
+            # Command: /block or .block (Admin & Owner)
             if cmd == "block":
-                if chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 target = text[len(text.split()[0]):].strip()
                 if not target:
-                    await event.reply("💡 **Usage:** `/block <@username or user_id>`")
+                    reply = await event.get_reply_message()
+                    if reply and reply.sender_id:
+                        target = str(reply.sender_id)
+                if not target:
+                    await event.reply("💡 **Usage:** `/block <@username or user_id>` or reply to a user")
                     return
 
                 b_id = target
                 b_name = ""
                 try:
-                    entity = await bot.get_entity(target)
+                    entity = await bot.get_entity(target if not target.lstrip("-").isdigit() else int(target))
                     b_id = str(entity.id)
                     if getattr(entity, "username", None):
                         b_name = f"@{entity.username}"
@@ -2256,8 +2582,15 @@ async def start_aurora_bot():
 
                 info = {"id": b_id, "username": b_name or "N/A"}
                 BLOCKED_USERS[b_id] = info
+                try:
+                    BLOCKED_USERS[int(b_id)] = info
+                except Exception:
+                    pass
                 if b_name:
+                    b_clean = b_name.lower().lstrip("@")
                     BLOCKED_USERS[b_name.lower()] = info
+                    BLOCKED_USERS[b_clean] = info
+                    BLOCKED_USERS[f"@{b_clean}"] = info
 
                 try:
                     with db_session() as session:
@@ -2272,27 +2605,31 @@ async def start_aurora_bot():
                 await event.reply(f"🚫 **Blocked User:** {u_str}")
                 return
 
-            # Command: /unblock or .unblock (Owner Only)
+            # Command: /unblock or .unblock (Admin & Owner)
             if cmd == "unblock":
-                if chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 target = text[len(text.split()[0]):].strip()
                 if not target:
-                    await event.reply("💡 **Usage:** `/unblock <@username or user_id>`")
+                    reply = await event.get_reply_message()
+                    if reply and reply.sender_id:
+                        target = str(reply.sender_id)
+                if not target:
+                    await event.reply("💡 **Usage:** `/unblock <@username or user_id>` or reply to a user")
                     return
 
                 removed = False
-                target_lower = target.lower()
+                target_lower = target.lower().lstrip("@")
                 for k in list(BLOCKED_USERS.keys()):
-                    if k.lower() == target_lower or str(BLOCKED_USERS[k].get("id")) == target:
+                    if str(k).lower().lstrip("@") == target_lower or str(BLOCKED_USERS[k].get("id")) == target:
                         r_id = BLOCKED_USERS[k].get("id")
                         BLOCKED_USERS.pop(k, None)
                         removed = True
                         try:
                             with db_session() as session:
                                 session.query(BlockedUser).filter(
-                                    (BlockedUser.user_id == r_id) | (BlockedUser.username == k)
+                                    (BlockedUser.user_id == str(r_id)) | (BlockedUser.username == k)
                                 ).delete(synchronize_session=False)
                                 session.commit()
                         except Exception:
@@ -2304,10 +2641,10 @@ async def start_aurora_bot():
                     await event.reply(f"ℹ️ **User `{target}` is not in blocked list.**")
                 return
 
-            # Command: /listblock or /blockeduser or .listblock or .blockeduser (Owner Only)
+            # Command: /listblock or /blockeduser or .listblock or .blockeduser (Admin & Owner)
             if cmd in ["listblock", "blockeduser"]:
-                if chat_id != Config.OWNER_ID:
-                    await event.reply("⛔ **Owner privileges required.**")
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
 
                 unique_blocked = {}
@@ -2318,7 +2655,7 @@ async def start_aurora_bot():
                     await event.reply("ℹ️ **No users currently blocked.**")
                     return
 
-                res = "🚫 **Blocked Users List:**\n\n"
+                res = f"🚫 **Blocked Users List (`{len(unique_blocked)}`):**\n\n"
                 for b_id, b_name in unique_blocked.items():
                     res += f"• `{b_name}` (ID: `{b_id}`)\n"
                 await event.reply(res)
@@ -2326,7 +2663,7 @@ async def start_aurora_bot():
 
             # Command: /allow or .allow (Owner & Admin)
             if cmd == "allow":
-                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS and sender_id_str not in SUDO_USERS:
+                if not is_admin_or_owner(chat_id, uname):
                     await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 target = text[len(text.split()[0]):].strip()
@@ -2352,8 +2689,15 @@ async def start_aurora_bot():
 
                 info = {"id": a_id, "username": a_name or "N/A"}
                 ALLOWED_USERS[a_id] = info
+                try:
+                    ALLOWED_USERS[int(a_id)] = info
+                except Exception:
+                    pass
                 if a_name:
+                    a_clean = a_name.lower().lstrip("@")
                     ALLOWED_USERS[a_name.lower()] = info
+                    ALLOWED_USERS[a_clean] = info
+                    ALLOWED_USERS[f"@{a_clean}"] = info
 
                 try:
                     with db_session() as session:
@@ -2370,7 +2714,7 @@ async def start_aurora_bot():
 
             # Command: /disallow or .disallow (Owner & Admin)
             if cmd == "disallow":
-                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS and sender_id_str not in SUDO_USERS:
+                if not is_admin_or_owner(chat_id, uname):
                     await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
                 target = text[len(text.split()[0]):].strip()
@@ -2385,14 +2729,14 @@ async def start_aurora_bot():
                 removed = False
                 target_lower = target.lower().lstrip("@")
                 for k in list(ALLOWED_USERS.keys()):
-                    if k.lower() == target_lower or str(ALLOWED_USERS[k].get("id")) == target:
+                    if str(k).lower().lstrip("@") == target_lower or str(ALLOWED_USERS[k].get("id")) == target:
                         r_id = ALLOWED_USERS[k].get("id")
                         ALLOWED_USERS.pop(k, None)
                         removed = True
                         try:
                             with db_session() as session:
                                 session.query(AllowedUser).filter(
-                                    (AllowedUser.user_id == r_id) | (AllowedUser.username == k)
+                                    (AllowedUser.user_id == str(r_id)) | (AllowedUser.username == k)
                                 ).delete(synchronize_session=False)
                                 session.commit()
                         except Exception:
@@ -2406,7 +2750,7 @@ async def start_aurora_bot():
 
             # Command: /allowedlist or .allowedlist (Owner & Admin)
             if cmd in ["allowedlist", "listallow", "allowlist"]:
-                if chat_id != Config.OWNER_ID and chat_id not in SUDO_USERS and sender_id_str not in SUDO_USERS:
+                if not is_admin_or_owner(chat_id, uname):
                     await event.reply("⛔ **Owner or Bot Admin privileges required.**")
                     return
 
@@ -2425,6 +2769,77 @@ async def start_aurora_bot():
                 await event.reply(res)
                 return
 
+            # Command: .broadcast or /broadcast (User Local Broadcast)
+            if cmd == "broadcast":
+                reply = await event.get_reply_message()
+                msg_text = text[len(first_word):].strip()
+                if not msg_text and reply:
+                    msg_text = reply.text or reply.message
+
+                if not msg_text:
+                    await event.reply("❌ **Provide message text or reply to a message to broadcast.**\n💡 **Example:** `.broadcast Hello everyone!`")
+                    return
+
+                user_client = session_manager.get_active_client(chat_id)
+                if not user_client or not user_client.is_connected():
+                    user_client = await session_manager.start_user_session(chat_id)
+
+                if not user_client or not user_client.is_connected():
+                    await event.reply("❌ **Active userbot session required!**\n\n*You must have a hosted userbot to broadcast to your groups. Send /host to login.*")
+                    return
+
+                status_msg = await event.reply("📢 **Starting user local broadcast across your groups...**")
+                sent = 0
+                failed = 0
+                processed_chats = set()
+
+                try:
+                    async for dialog in user_client.iter_dialogs():
+                        is_grp = dialog.is_group or (dialog.is_channel and getattr(dialog.entity, "megagroup", False))
+                        if is_grp and dialog.id not in processed_chats:
+                            processed_chats.add(dialog.id)
+                            try:
+                                if reply:
+                                    await user_client.send_message(dialog.id, reply)
+                                else:
+                                    await user_client.send_message(dialog.id, msg_text)
+                                sent += 1
+                                await asyncio.sleep(0.4)
+                            except Exception:
+                                failed += 1
+                    await status_msg.edit(f"📢 **User Broadcast Complete!**\n\n✅ **Sent from your account to:** `{sent}` groups\n❌ **Failed in:** `{failed}` groups")
+                except Exception as e:
+                    await status_msg.edit(f"❌ **Broadcast error:** `{e}`")
+                return
+
+            # Command: .setwelcome / .setwlcm
+            if cmd in ["setwelcome", "setwlcm"]:
+                user_client = session_manager.get_active_client(chat_id)
+                if not user_client or not user_client.is_connected():
+                    user_client = await session_manager.start_user_session(chat_id)
+                if not user_client or not user_client.is_connected():
+                    await event.reply("❌ **Active userbot session required!** Send /host to deploy your userbot.")
+                    return
+                val = text[len(first_word):].strip()
+                if val:
+                    from aurora.plugins.welcome import WELCOME_SETTINGS, GLOBAL_WELCOME
+                    me = await user_client.get_me()
+                    GLOBAL_WELCOME[me.id] = val
+                    WELCOME_SETTINGS[chat_id] = val
+                    await event.reply(f"🎉 **Custom Welcome Message Set For First DMs & Groups!**\n\n💬 `{val}`")
+                else:
+                    await event.reply("❌ **Provide a welcome message.**\n💡 **Example:** `.setwlcm Welcome!`")
+                return
+
+            # Command: .ping / /ping
+            if cmd == "ping":
+                start_p = time.time()
+                msg_p = await event.reply("🏓 **Pinging...**")
+                end_p = time.time()
+                ms_p = round((end_p - start_p) * 1000, 2)
+                await msg_p.edit(f"🏓 **Pong!**\n⚡ **Speed:** `{ms_p} ms`\n🟢 **Status:** Active")
+                return
+
             # Command: /stats or .stats
             if cmd == "stats":
                 total_active = len(session_manager.get_all_active_users())
@@ -2441,57 +2856,8 @@ async def start_aurora_bot():
                 await event.reply(stats_msg)
                 return
 
-            # Any other command should return here so it doesn't fall into the onboarding phone handler
+            # Any other recognized command or non-phone input should return here
             return
-
-        # Userbot Dot Command Handler (.setwelcome, .broadcast, .ping, etc.)
-        if text.startswith("."):
-            user_client = session_manager.get_active_client(chat_id)
-            if not user_client or not user_client.is_connected():
-                user_client = await session_manager.start_user_session(chat_id)
-
-            if user_client and user_client.is_connected():
-                cmd_name = text.split()[0][1:].lower()
-                if cmd_name in ["setwelcome", "setwlcm"]:
-                    val = text.replace(f".{cmd_name}", "").strip()
-                    if val:
-                        from aurora.plugins.welcome import WELCOME_SETTINGS, GLOBAL_WELCOME
-                        me = await user_client.get_me()
-                        GLOBAL_WELCOME[me.id] = val
-                        WELCOME_SETTINGS[chat_id] = val
-                        await event.reply(f"🎉 **Custom Welcome Message Set For First DMs & Groups!**\n\n💬 `{val}`")
-                    else:
-                        await event.reply("❌ **Provide a welcome message.**\n💡 **Example:** `.setwlcm Welcome!`")
-                    return
-                elif cmd_name == "broadcast":
-                    msg_text = text.replace(".broadcast", "").strip()
-                    if not msg_text:
-                        await event.reply("❌ **Provide message text to broadcast.**\n💡 **Example:** `.broadcast Hello everyone!`")
-                        return
-                    msg = await event.reply("📢 **Starting global broadcast...**")
-                    sent = 0
-                    failed = 0
-                    async for dialog in user_client.iter_dialogs():
-                        if dialog.is_group:
-                            try:
-                                await user_client.send_message(dialog.id, msg_text)
-                                sent += 1
-                                await asyncio.sleep(0.4)
-                            except Exception:
-                                failed += 1
-                    await msg.edit(f"📢 **Global Broadcast Complete!**\n\n✅ **Sent to:** `{sent}` groups\n❌ **Failed in:** `{failed}` groups")
-                    return
-                elif cmd_name == "ping":
-                    start = time.time()
-                    msg = await event.reply("🏓 **Pinging...**")
-                    end = time.time()
-                    ms = round((end - start) * 1000, 2)
-                    await msg.edit(f"🏓 **Pong!**\n⚡ **Speed:** `{ms} ms`\n🟢 **Userbot Status:** Active")
-                    return
-                else:
-                    return
-            else:
-                return
 
         # Onboarding Flow Handler
         if chat_id in user_login_states:
