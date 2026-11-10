@@ -19,6 +19,8 @@ plugin_manager.register_command("gcast", "bcast", "Broadcasts message via Bot Ac
 plugin_manager.register_command("gbroadcast", "bcast", "Broadcasts message via Bot Account to all bot groups (Admin/Owner).", f"{Config.COMMAND_HANDLER}gbroadcast <message>")
 plugin_manager.register_command("broadcast", "bcast", "Broadcasts message from user account to all joined groups.", f"{Config.COMMAND_HANDLER}broadcast <message>")
 plugin_manager.register_command("glist", "bcast", "Lists all groups where bot has admin access.", f"{Config.COMMAND_HANDLER}glist")
+plugin_manager.register_command("dmcast", "bcast", "Broadcasts message via Bot Account to all bot users in DM (Admin/Owner).", f"{Config.COMMAND_HANDLER}dmcast <message>")
+plugin_manager.register_command("broadcastusers", "bcast", "Broadcasts message via Bot Account to all bot users in DM (Admin/Owner).", f"{Config.COMMAND_HANDLER}broadcastusers <message>")
 
 
 def register_broadcast_handlers(client):
@@ -59,7 +61,7 @@ def register_broadcast_handlers(client):
                     LOGS.debug(f"Broadcast failed in {dialog.id}: {e}")
                     failed += 1
 
-        await msg.edit(f"📢 **User Broadcast Complete!**\n\n✅ **Sent from your account to:** `{sent}` groups\n❌ **Failed in:** `{failed}` groups")
+        await msg.edit(f"📢 **Local Broadcast Complete!**\n\n✅ **Sent to:** `{sent}` groups (only groups where you are present)\n❌ **Failed in:** `{failed}` groups")
 
     @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](gcast|gbroadcast)(?:\s+([\s\S]+))?"))
     async def gbroadcast_handler(event):
@@ -95,4 +97,26 @@ def register_broadcast_handlers(client):
 
         msg = await event.edit("⏳ **Checking groups where bot has admin access...**")
         res = await get_bot_admin_groups_list()
+        await msg.edit(res)
+
+    @client.on(events.NewMessage(outgoing=True, pattern=r"^[./](dmcast|broadcastusers|bcastusers)(?:\s+([\s\S]+))?"))
+    async def dmcast_handler(event):
+        from aurora.bot import execute_dm_broadcast, is_admin_or_owner
+
+        me = await client.get_me()
+        if not is_admin_or_owner(me.id, getattr(me, "username", None)):
+            await event.edit("⛔ **Owner or Bot Admin privileges required.**")
+            return
+
+        reply = await event.get_reply_message()
+        msg_text = event.pattern_match.group(2)
+        if not msg_text and reply:
+            msg_text = reply.text or reply.message
+
+        if not msg_text:
+            await event.edit("❌ **Provide message text or reply to broadcast to all bot users.**\n💡 **Example:** `.dmcast Hello bot users!`")
+            return
+
+        msg = await event.edit("📢 **Sending DM Broadcast to all bot users via Bot Account...**")
+        res = await execute_dm_broadcast(msg_text, reply_msg=reply, event=event)
         await msg.edit(res)

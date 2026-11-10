@@ -563,6 +563,101 @@ async def get_bot_admin_groups_list(bot=None):
     return res
 
 
+def record_bot_user(user_id: int, username: str = None, first_name: str = None):
+    """Records or updates a user who interacted with the bot."""
+    try:
+        init_db()
+        with db_session() as session:
+            u = session.query(User).filter(User.telegram_id == user_id).first()
+            if not u:
+                session.add(
+                    User(
+                        telegram_id=user_id,
+                        username=username,
+                        first_name=first_name,
+                        role="owner" if user_id == Config.OWNER_ID else "user",
+                        is_active=True,
+                        created_at=datetime.utcnow(),
+                        last_login=datetime.utcnow(),
+                    )
+                )
+            else:
+                u.last_login = datetime.utcnow()
+                if username:
+                    u.username = username
+                if first_name:
+                    u.first_name = first_name
+            session.commit()
+    except Exception as e:
+        LOGS.debug(f"Error recording bot user {user_id}: {e}")
+
+
+def get_all_bot_user_ids():
+    """Returns a set of all unique Telegram user IDs who have used or hosted the bot."""
+    user_ids = set()
+    try:
+        with db_session() as session:
+            for u in session.query(User).all():
+                user_ids.add(u.telegram_id)
+            for us in session.query(UserSession).all():
+                user_ids.add(us.telegram_id)
+            for al in session.query(AllowedUser).all():
+                try:
+                    user_ids.add(int(al.user_id))
+                except Exception:
+                    pass
+    except Exception as e:
+        LOGS.error(f"Error fetching bot user IDs: {e}")
+
+    for uid in ALLOWED_USERS:
+        try:
+            user_ids.add(int(uid))
+        except Exception:
+            pass
+    for uid in session_manager.get_all_active_users():
+        user_ids.add(uid)
+    return user_ids
+
+
+async def execute_dm_broadcast(msg_text, reply_msg=None, event=None):
+    """
+    Broadcasts a message strictly via the Telegram Bot Account to all bot users in their private DMs.
+    Accessible to Admins and Owner.
+    """
+    b_client = main_bot_client
+    if not b_client or not b_client.is_connected():
+        return "❌ **Telegram Bot Account is not connected.**"
+
+    all_user_ids = get_all_bot_user_ids()
+    total_users = len(all_user_ids)
+
+    if total_users == 0:
+        return "ℹ️ **No bot users recorded in database.**"
+
+    sent = 0
+    failed = 0
+
+    for u_id in all_user_ids:
+        try:
+            if reply_msg:
+                await b_client.send_message(u_id, reply_msg)
+            else:
+                await b_client.send_message(u_id, msg_text)
+            sent += 1
+            await asyncio.sleep(0.35)
+        except Exception as e:
+            failed += 1
+            LOGS.debug(f"Bot failed to send DM broadcast to user {u_id}: {e}")
+
+    res = (
+        f"📢 **User DM Broadcast Complete!**\n\n"
+        f"🤖 **Sent by Bot Account to:** `{sent}` users in DM\n"
+        f"❌ **Failed / Blocked by:** `{failed}` users\n"
+        f"📊 **Total Bot Users:** `{total_users}`"
+    )
+    return res
+
+
 async def perform_group_ban(client, group_id, raw_target, resolved_entity=None, numeric_id=None, norm_username=None):
     """
     Attempts to ban a target in group_id using client (bot or userbot).
@@ -1268,6 +1363,7 @@ CATEGORIES_INFO = {
         "🔹 `/unblock <@username/id>` - Unblock user\n"
         "🔹 `/blockeduser` - List blocked users\n"
         "🔹 `/gbroadcast <message>` - Broadcast via bot account to bot groups\n"
+        "🔹 `/dmcast <message>` - Broadcast via bot account to all bot users in DM\n"
         "🔹 `/glist` - List groups where bot has admin access\n"
         "🔹 `/listsudousers` - View all Sudo Admins\n"
         "🔹 `/restartall` | `/refresh` - Platform maintenance"
@@ -1292,6 +1388,8 @@ CATEGORIES_INFO = {
         "🔹 `/blockeduser` - View all blocked users.\n\n"
         "🔹 `/gbroadcast <message>` (or `.gbroadcast`)\n"
         "   📝 Broadcast via Bot Account to all groups bot is present in.\n"
+        "🔹 `/dmcast <message>` (or `/broadcastusers`)\n"
+        "   📝 Broadcast via Bot Account to all bot users in their private DMs.\n"
         "🔹 `/glist` (or `.glist`)\n"
         "   📝 View all groups where the bot is present and has admin access.\n"
         "🔹 `/listgroups` - View all platform group memberships.\n"
@@ -1306,6 +1404,9 @@ CATEGORIES_INFO = {
         "🔹 `/gbroadcast <message>` (or `.gbroadcast`)\n"
         "   📝 **Bot Global Broadcast:** Sent by the BOT ACCOUNT to all groups where the bot is present (Owner/Admin).\n"
         "   💡 **Example:** `/gbroadcast Welcome to Aurora Userbot Network!`\n\n"
+        "🔹 `/dmcast <message>` (or `/broadcastusers`)\n"
+        "   📝 **Bot User DM Broadcast:** Sent by the BOT ACCOUNT to all bot users in their private DMs (Owner/Admin).\n"
+        "   💡 **Example:** `/dmcast Important announcement for all users!`\n\n"
         "🔹 `/glist` (or `.glist`)\n"
         "   📝 **Bot Admin Groups:** Lists all groups where the bot is present and has admin rights (Owner/Admin)."
     ),
@@ -1582,6 +1683,7 @@ async def start_aurora_bot():
                 "addsudo", "addsudousers", "rmsudo", "removesodousers", "removesudouser",
                 "listsudousers", "sudolist", "adminlist",
                 "listgroups", "gbroadcast", "gcast", "glist",
+                "dmcast", "broadcastusers", "bcastusers", "userbroadcast",
                 "restartall", "refresh",
                 "block", "unblock", "blockeduser", "listblock",
                 "allow", "disallow", "allowedlist"
@@ -1650,6 +1752,52 @@ async def start_aurora_bot():
                     msg = await event.reply("⏳ **Fetching groups where bot has admin access...**")
                     res = await get_bot_admin_groups_list(bot)
                     await msg.edit(res)
+                    return
+                elif cmd in ["dmcast", "broadcastusers", "bcastusers", "userbroadcast"]:
+                    reply = await event.get_reply_message()
+                    msg_text = text[len(first_word):].strip()
+                    if not msg_text and reply:
+                        msg_text = reply.text or reply.message
+                    if not msg_text:
+                        await event.reply("💡 **Usage:** `.dmcast <message>` or reply to a message")
+                        return
+                    msg = await event.reply("📢 **Sending DM Broadcast to all bot users via Bot Account...**")
+                    res = await execute_dm_broadcast(msg_text, reply_msg=reply, event=event)
+                    await msg.edit(res)
+                    return
+                elif cmd == "broadcast":
+                    reply = await event.get_reply_message()
+                    msg_text = text[len(first_word):].strip()
+                    if not msg_text and reply:
+                        msg_text = reply.text or reply.message
+                    if not msg_text:
+                        await event.reply("❌ **Provide message text or reply to a message to broadcast.**\n💡 **Example:** `.broadcast Hello everyone!`")
+                        return
+                    user_client = session_manager.get_active_client(sender_id)
+                    if not user_client or not user_client.is_connected():
+                        await event.reply("❌ **Active userbot session required!** Send /host to the bot in DM to deploy your userbot.")
+                        return
+                    status_msg = await event.reply("📢 **Starting local broadcast across groups where you are present...**")
+                    sent = 0
+                    failed = 0
+                    processed_chats = set()
+                    try:
+                        async for dialog in user_client.iter_dialogs():
+                            is_grp = dialog.is_group or (dialog.is_channel and getattr(dialog.entity, "megagroup", False))
+                            if is_grp and dialog.id not in processed_chats:
+                                processed_chats.add(dialog.id)
+                                try:
+                                    if reply:
+                                        await user_client.send_message(dialog.id, reply)
+                                    else:
+                                        await user_client.send_message(dialog.id, msg_text)
+                                    sent += 1
+                                    await asyncio.sleep(0.4)
+                                except Exception:
+                                    failed += 1
+                        await status_msg.edit(f"📢 **Local Broadcast Complete!**\n\n✅ **Sent to:** `{sent}` groups (only groups where you are present)\n❌ **Failed in:** `{failed}` groups")
+                    except Exception as e:
+                        await status_msg.edit(f"❌ **Broadcast error:** `{e}`")
                     return
                 elif cmd in ["addsudousers", "addsudo"]:
                     if not is_owner(sender_id, uname):
@@ -2038,6 +2186,8 @@ async def start_aurora_bot():
         sender_obj = await event.get_sender()
         uname = getattr(sender_obj, "username", None) or ""
         uname_key = f"@{uname.lower()}" if uname else ""
+        first_n = getattr(sender_obj, "first_name", None) or ""
+        record_bot_user(chat_id, uname, first_n)
 
         # Check Blocked & GBAN list
         is_blocked = (
@@ -2478,6 +2628,23 @@ async def start_aurora_bot():
                 await msg.edit(res)
                 return
 
+            # Command: /dmcast or /broadcastusers (Admin & Owner)
+            if cmd in ["dmcast", "broadcastusers", "bcastusers", "userbroadcast"]:
+                if not is_admin_or_owner(chat_id, uname):
+                    await event.reply("⛔ **Owner or Bot Admin privileges required.**")
+                    return
+                reply = await event.get_reply_message()
+                msg_text = text[len(text.split()[0]):].strip()
+                if not msg_text and reply:
+                    msg_text = reply.text or reply.message
+                if not msg_text:
+                    await event.reply("💡 **Usage:** `/dmcast <message>` or reply to a message")
+                    return
+                msg = await event.reply("📢 **Sending DM Broadcast to all bot users via Bot Account...**")
+                res = await execute_dm_broadcast(msg_text, reply_msg=reply, event=event)
+                await msg.edit(res)
+                return
+
             # Command: /clearbotgroups (Owner Only)
             if cmd == "clearbotgroups":
                 if not is_owner(chat_id, uname):
@@ -2807,7 +2974,7 @@ async def start_aurora_bot():
                                 await asyncio.sleep(0.4)
                             except Exception:
                                 failed += 1
-                    await status_msg.edit(f"📢 **User Broadcast Complete!**\n\n✅ **Sent from your account to:** `{sent}` groups\n❌ **Failed in:** `{failed}` groups")
+                    await status_msg.edit(f"📢 **Local Broadcast Complete!**\n\n✅ **Sent to:** `{sent}` groups (only groups where you are present)\n❌ **Failed in:** `{failed}` groups")
                 except Exception as e:
                     await status_msg.edit(f"❌ **Broadcast error:** `{e}`")
                 return
